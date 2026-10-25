@@ -54,13 +54,20 @@ fi
 
 SIM=""; RSSI=""; RSRP=""; RSRQ=""; SINR=""; REG=""; TEMP=""; OPER=""; BAND=""
 RRC=""; CELLID=""; PCI=""; EARFCN=""; MODEL=""; APN=""; WIP=""; WIP6=""; DNS=""
-IMEI=""; ICCID=""; IMSI=""
+IMEI=""; ICCID=""; IMSI=""; MSISDN=""
 if [ -n "$AT_PORT" ]; then
   MODEL=$(at_cmd ATI | grep -vE '^(OK|ERROR)$' | tr '\n' ' ' | sed 's/Revision: //; s/ *$//')
   # identities: module IMEI, SIM ICCID and IMSI (empty when unreadable)
   IMEI=$(at_cmd AT+CGSN | grep -E '^[0-9]{14,17}$')
   ICCID=$(at_cmd AT+QCCID | sed -n 's/.*+QCCID: *\([0-9A-Fa-f]*\).*/\1/p')
   IMSI=$(at_cmd AT+CIMI | grep -E '^[0-9]{6,15}$')
+  # Own number: accept international form only; type 145 also supplies the leading +.
+  MSISDN=$(at_cmd AT+CNUM | awk -F'"' '/^\+CNUM:/ && !done {
+    empty_alpha=($1 ~ /^\+CNUM:[[:space:]]*,[[:space:]]*$/)
+    number=empty_alpha ? $2 : $4; number_type=empty_alpha ? $3 : $5
+    if (number ~ /^[0-9]+$/ && number_type ~ /^,[[:space:]]*145(,|$)/) number="+" number
+    if (number ~ /^\+[1-9][0-9]+$/) { print number; done=1 }
+  }')
   # SIM state
   CPIN=$(at_cmd 'AT+CPIN?')
   case "$CPIN" in
@@ -117,7 +124,7 @@ L=$(wc -l < "$HIST")
 jn() { [ -n "$1" ] && echo "$1" || echo null; }
 js() { [ -n "$1" ] && echo "\"$1\"" || echo null; }
 cat > "$WEB/status.json.tmp" <<JSON
-{"ts":"$TS","epoch":$NOW,"present":$PRESENT,"usb_port":$(js "$PORT"),"at_port":$(js "$AT_PORT"),"model":$(js "$MODEL"),"imei":$(js "$IMEI"),"iccid":$(js "$ICCID"),"imsi":$(js "$IMSI"),
+{"ts":"$TS","epoch":$NOW,"present":$PRESENT,"usb_port":$(js "$PORT"),"at_port":$(js "$AT_PORT"),"model":$(js "$MODEL"),"imei":$(js "$IMEI"),"iccid":$(js "$ICCID"),"imsi":$(js "$IMSI"),"msisdn":$(js "$MSISDN"),
 "sim":$(js "$SIM"),"rssi":$(jn "$RSSI"),"rsrp":$(jn "$RSRP"),"rsrq":$(jn "$RSRQ"),"sinr":$(jn "$SINR"),
 "reg":$(jn "$REG"),"temp":$(jn "$TEMP"),"oper":$(js "$OPER"),"band":$(js "$BAND"),
 "rrc":$(js "$RRC"),"cellid":$(js "$CELLID"),"pci":$(js "$PCI"),"earfcn":$(js "$EARFCN"),

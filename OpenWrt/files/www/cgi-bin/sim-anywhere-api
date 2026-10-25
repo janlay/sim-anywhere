@@ -24,6 +24,7 @@
 const fs = require('fs');
 
 const STATUS = '/tmp/dongle-web/status.json';
+const PHONE = '/tmp/dongle-vowifi-phone.json';
 const HIST = '/root/dongle-history.csv';
 const SMS = '/root/dongle-sms.tsv';
 const CALLS = '/root/dongle-calls.tsv';
@@ -281,8 +282,33 @@ function rewrite(set, fn) {
 }
 // single-quote for the shell
 function sq(s) { return "'" + replace(s, "'", "'\\''") + "'"; }
+// Own SIM number: HTTP consumers receive only the calling code and the last four digits.
+function masked_phone(number) {
+	if (type(number) != 'string' || !match(number, /^\+[1-9][0-9]{5,14}$/)) return null;
+	// E.164: +1 and +7 have one digit; the listed prefixes have two; all others have three.
+	let prefix = match(number, /^\+(1|7|20|27|3[0-469]|4[013-9]|5[1-8]|6[0-6]|8[1246]|9[0-58])/)
+		?? match(number, /^\+[2-9][0-9]{2}/);
+	if (!prefix || length(number) - length(prefix[0]) <= 4) return null;
+	return prefix[0] + ' ****' + substr(number, length(number) - 4);
+}
+function status_phone(s) {
+	if (s.present != 1 || s.sim != 'ready') return null;
+	let number = masked_phone(s.msisdn);
+	if (number != null) return number;
+	let cached = null;
+	try { cached = json(fs.readfile(PHONE) || 'null'); } catch (e) {}
+	return s.imsi != null && cached != null && cached.imsi == s.imsi ? masked_phone(cached.msisdn) : null;
+}
 function at(args) {
 	let p = fs.popen('/usr/bin/dongle-at ' + args), out = trim(p.read('all') || ''), rc = p.close();
+	// The AT console must not bypass the status API's own-number mask.
+	out = join('\n', map(split(out, '\n'), line => {
+		if (!match(line, /^\+CNUM:/)) return line;
+		let fields = split(line, '"'), empty_alpha = match(fields[0], /^\+CNUM:\s*,\s*$/);
+		let number = fields[empty_alpha ? 1 : 3], number_type = fields[empty_alpha ? 2 : 4];
+		if (number != null && match(number, /^[0-9]+$/) && match(number_type ?? '', /^,\s*145(,|$)/)) number = '+' + number;
+		return '+CNUM: ' + (masked_phone(number) ?? 'unavailable');
+	}));
 	return { ok: rc == 0, out };
 }
 
@@ -344,7 +370,7 @@ function rewrite_calls(set) {
 /* ---------- status stream ---------- */
 // NDJSON, one record per second: epoch, rx, tx (usb0 bytes since boot), usb0_carrier. When the collector writes a new
 // sample (about once a minute), that record also carries the sample's fields (ts, epoch and AT-based) and sample_epoch.
-const STREAM_SKIP = { rx: 1, tx: 1, usb0_carrier: 1 };
+const STREAM_SKIP = { rx: 1, tx: 1, usb0_carrier: 1, msisdn: 1 };
 function status_stream(seconds) {
 	if (seconds < 1 || seconds > 3600) fail(400, 'seconds must be 1-3600');
 	print('Status: 200 OK\r\nContent-Type: application/x-ndjson; charset=utf-8\r\nCache-Control: no-store\r\n\r\n');
@@ -358,6 +384,7 @@ function status_stream(seconds) {
 			sample_epoch = s.epoch;
 			for (let k in keys(s))
 				if (!STREAM_SKIP[k]) rec[k] = s[k];
+			rec.phone_masked = status_phone(s);
 			rec.sample_epoch = s.epoch;
 		}
 		print(sprintf('%J', rec), '\n');

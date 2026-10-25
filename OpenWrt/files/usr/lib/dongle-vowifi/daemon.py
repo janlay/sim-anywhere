@@ -28,6 +28,7 @@ from amr import AmrNB, FRAME_SAMPLES
 import discovery as D
 
 SOCK_PATH = "/var/run/dongle-vowifid.sock"
+PHONE_PATH = "/tmp/dongle-vowifi-phone.json"
 AMR_PT = 104
 TE_PT = 101
 RTP_PORT = 50000
@@ -712,6 +713,16 @@ class Daemon:
             uris += re.findall(r"<([^>]+)>", v)
         client.local_uri = uris[0] if uris else client.impu
         client.pref_uri = next((u for u in uris if "user=phone" in u), client.local_uri)
+        # Some SIMs leave AT+CNUM empty. Keep the IMS-assigned number local to the node.
+        number = next((m[1] for u in uris
+                       if (m := re.match(r"(?:sip:|tel:)(\+[1-9][0-9]{5,14})(?=[@;]|$)", u))), None)
+        try:
+            fd = os.open(PHONE_PATH + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump({"imsi": self.imsi, "msisdn": number}, f)
+            os.replace(PHONE_PATH + ".tmp", PHONE_PATH)
+        except OSError:
+            log("own number cache unavailable")
         log("local URI", V.masked_sip(client.local_uri, self.imsi, self.imei))
         for q in client.ike.ike_queue:
             self.handle_ike(q)

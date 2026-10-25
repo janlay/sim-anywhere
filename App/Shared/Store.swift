@@ -348,7 +348,7 @@ extension DongleStatus {
         if netifd_up != 1 { return (.crit, "链路中断", "usb0 接口未建立 (netifd down)") }
         if at_port == nil { return (.warn, "在线 · 无模组数据", "串口未就绪，无法读取 AT 信息") }
         if reg != 1 && reg != 5 { return (.warn, "网络注册异常", "CEREG 状态 \(reg.map(String.init) ?? "—")") }
-        let sub = [Fmt.oper(oper), band.map { "LTE B\($0)" }, Fmt.rrc(rrc)]
+        let sub = [phone_masked, Fmt.oper(oper)]
         return (.good, "在线", sub.compactMap { $0 }.joined(separator: " · "))
     }
 }

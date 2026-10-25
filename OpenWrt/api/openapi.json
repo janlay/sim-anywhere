@@ -505,7 +505,7 @@
     ],
     "summary": "Send one AT command",
     "operationId": "sendAt",
-    "description": "Sends the command on the modem AT port (under the AT lock) and returns the response lines. The modem echo and the final result line are not in `lines`. `result` is `TIMEOUT` when no final result came within `timeout` seconds of the last line.",
+    "description": "Sends the command on the modem AT port (under the AT lock) and returns the response lines. The own SIM number in each +CNUM response is masked before HTTP output; plaintext own numbers are not returned. The modem echo and the final result line are not in `lines`. `result` is `TIMEOUT` when no final result came within `timeout` seconds of the last line.",
     "requestBody": {
      "required": true,
      "content": {
@@ -1116,6 +1116,15 @@
        "null"
       ],
       "description": "SIM IMSI (AT+CIMI)"
+     },
+     "phone_masked": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "Own SIM number from AT+CNUM or the matching SIM's IMS registration, masked by the HTTP API as +<country-code> ****<last-four-digits>. Never returns the plaintext number. Null when unavailable or not in international form.",
+      "pattern": "^\\+[1-9][0-9]{0,2} \\*{4}[0-9]{4}$",
+      "example": "+65 ****1234"
      },
      "sim": {
       "type": [
