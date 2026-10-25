@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SIM Anywhere</title>
+<style>
+:root{color-scheme:light;
+  --page:#f4f4f1;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--mut:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--ring:rgba(11,11,11,.09);
+  --s1:#2a78d6;--s2:#eb6834;--good:#0ca30c;--warn:#fab219;--serious:#ec835a;--crit:#d03b3b;--none:#c9c8c1;
+  --wash:rgba(42,120,214,.08);--band:rgba(11,11,11,.025)}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){color-scheme:dark;
+  --page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--mut:#898781;--grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.08);
+  --s1:#3987e5;--s2:#d95926;--none:#3a3a37;--wash:rgba(57,135,229,.14);--band:rgba(255,255,255,.025)}}
+:root[data-theme=dark]{color-scheme:dark;
+  --page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--mut:#898781;--grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.08);
+  --s1:#3987e5;--s2:#d95926;--none:#3a3a37;--wash:rgba(57,135,229,.14);--band:rgba(255,255,255,.025)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC",sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1080px;margin:0 auto;padding:20px 16px 40px}
+.card{background:var(--surface);border-radius:14px;box-shadow:0 0 0 1px var(--ring);padding:16px 18px}
+.mut{color:var(--mut)} .ink2{color:var(--ink2)} .num{font-variant-numeric:tabular-nums}
+h1{font-size:20px;margin:0;font-weight:650;letter-spacing:-.01em}
+h2{font-size:13px;margin:0;font-weight:600;color:var(--ink2)}
+/* header */
+.top{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.live{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);margin-top:4px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--good);box-shadow:0 0 0 3px color-mix(in srgb,var(--good) 22%,transparent)}
+.dot.stale{background:var(--warn);box-shadow:none}
+.seg{display:inline-flex;background:var(--surface);box-shadow:0 0 0 1px var(--ring);border-radius:9px;padding:2px;gap:2px}
+.seg a,.seg button{font:inherit;font-size:12.5px;border:0;background:none;color:var(--ink2);padding:5px 10px;border-radius:7px;cursor:pointer;text-decoration:none;white-space:nowrap}
+.seg .on{background:var(--ink);color:var(--surface);font-weight:600}
+.seg a:hover:not(.on),.seg button:hover:not(.on){background:var(--wash)}
+.tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.icon-btn{font:inherit;border:0;background:var(--surface);box-shadow:0 0 0 1px var(--ring);color:var(--ink2);border-radius:9px;width:32px;height:31px;cursor:pointer}
+/* hero */
+.hero{display:grid;grid-template-columns:1fr auto;gap:16px;align-items:center;margin-bottom:12px}
+.verdict{display:flex;align-items:center;gap:12px}
+.badge{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;flex:none;color:#fff;font-weight:700;font-size:20px}
+.verdict .t{font-size:22px;font-weight:650;letter-spacing:-.01em}
+.verdict .s{color:var(--ink2);font-size:13px;margin-top:2px}
+.facts{display:flex;gap:6px 18px;flex-wrap:wrap;margin-top:12px;font-size:12.5px;color:var(--ink2)}
+.facts b{color:var(--ink);font-weight:600}
+.sig{display:flex;align-items:center;gap:12px;padding-left:16px;border-left:1px solid var(--grid)}
+.bars{display:flex;align-items:flex-end;gap:3px;height:34px}
+.bars i{display:block;width:7px;border-radius:2px;background:var(--grid)}
+.sig .g{font-size:20px;font-weight:650} .sig .gs{font-size:12px;color:var(--mut)}
+.alert{display:none;margin-bottom:12px;padding:10px 14px;border-radius:10px;font-size:13px;background:color-mix(in srgb,var(--crit) 10%,var(--surface));box-shadow:0 0 0 1px color-mix(in srgb,var(--crit) 35%,transparent)}
+.alert.on{display:block}
+/* tiles */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:12px}
+.tile{padding:14px 16px 10px}
+.tile .k{font-size:12px;color:var(--ink2);display:flex;justify-content:space-between;align-items:center;gap:6px}
+.tile .v{font-size:26px;font-weight:650;letter-spacing:-.02em;margin-top:4px;line-height:1.1}
+.tile .v small{font-size:12px;font-weight:500;color:var(--mut);margin-left:3px;letter-spacing:0}
+.tile .sub{font-size:12px;color:var(--mut);margin-top:2px;min-height:17px}
+.pill{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--ink2);white-space:nowrap}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--c,var(--none))}
+.spark{display:block;width:100%;height:30px;margin-top:6px}
+/* section */
+.sec{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:24px 0 10px}
+.sec h3{margin:0;font-size:15px;font-weight:650}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));gap:12px}
+.chart-h{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+.legend{display:flex;gap:12px;font-size:12px;color:var(--ink2)}
+.legend span{display:inline-flex;align-items:center;gap:5px}
+.legend span::before{content:"";width:12px;height:2px;border-radius:1px;background:var(--c)}
+.plot{position:relative;height:190px;touch-action:pan-y}
+.plot svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.plot text{font-size:10.5px;fill:var(--mut);font-variant-numeric:tabular-nums}
+.tip{position:absolute;pointer-events:none;background:var(--surface);box-shadow:0 0 0 1px var(--ring),0 6px 20px rgba(0,0,0,.14);border-radius:8px;padding:7px 9px;font-size:12px;white-space:nowrap;display:none;z-index:2}
+.tip .tt{color:var(--mut);margin-bottom:3px}
+.tip .row{display:flex;align-items:center;gap:6px} .tip .row b{margin-left:auto;padding-left:12px;font-variant-numeric:tabular-nums}
+.tip .sw{width:8px;height:8px;border-radius:2px;background:var(--c)}
+/* timeline */
+.tl{position:relative;height:28px;border-radius:6px;overflow:hidden;background:var(--none)}
+.tl svg{width:100%;height:100%;display:block}
+.tl-foot{display:flex;justify-content:space-between;font-size:11px;color:var(--mut);margin-top:6px}
+.tl-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--ink2)}
+.avail{display:grid;grid-template-columns:repeat(4,1fr);gap:12px 16px;margin-bottom:12px}
+@media (max-width:420px){.avail{grid-template-columns:repeat(2,1fr)}}
+.avail .n{font-size:22px;font-weight:650;letter-spacing:-.02em} .avail .l{font-size:12px;color:var(--mut)}
+/* tabs */
+.tabs{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.tabbar{display:flex;gap:20px;border-bottom:1px solid var(--grid)}
+.tabbar a{position:relative;padding:6px 0 10px;color:var(--ink2);text-decoration:none;font-size:15px;font-weight:600;display:inline-flex;align-items:center;gap:6px}
+.tabbar a.on{color:var(--ink)}
+.tabbar a.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;border-radius:2px;background:var(--ink)}
+.cnt{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--crit);color:#fff;font-size:11px;line-height:18px;text-align:center;font-weight:600}
+.cnt:empty{display:none}
+a.sig{color:inherit;text-decoration:none;border-radius:10px}
+a.sig:hover .gs{color:var(--ink2)}
+/* sms */
+.btn{font:inherit;font-size:12.5px;border:0;background:var(--surface);box-shadow:0 0 0 1px var(--ring);color:var(--ink);border-radius:8px;padding:6px 12px;cursor:pointer;white-space:nowrap}
+.btn:hover{background:var(--wash)} .btn:disabled{opacity:.5;cursor:default}
+.btn.pri{background:var(--ink);color:var(--surface);box-shadow:none;font-weight:600}
+.btn.danger{color:var(--crit)}
+.sp{flex:1}
+.sms{padding:0;overflow:hidden}
+.sms-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:14px 18px;border-bottom:1px solid var(--grid)}
+.sms-h .h{font-size:15px;color:var(--ink);margin-right:4px}
+.compose{display:grid;gap:8px;padding:14px 18px;border-bottom:1px solid var(--grid);background:var(--band)}
+.compose input,.compose textarea{font:inherit;font-size:14px;color:var(--ink);background:var(--surface);border:0;box-shadow:0 0 0 1px var(--ring);border-radius:8px;padding:8px 10px;width:100%;resize:vertical}
+.compose input:focus,.compose textarea:focus{outline:2px solid var(--s1);outline-offset:0}
+.compose-f{display:flex;align-items:center;gap:8px;font-size:12px}
+.bulk,.sms-msg{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 18px;border-bottom:1px solid var(--grid);font-size:13px;background:var(--wash)}
+.bulk[hidden],.sms-msg[hidden],.compose[hidden]{display:none}
+.sms-msg.err{background:color-mix(in srgb,var(--crit) 10%,var(--surface))}
+.msgs{list-style:none;margin:0;padding:0}
+.msg{display:flex;gap:12px;padding:12px 18px;border-bottom:1px solid var(--grid);cursor:pointer}
+.msg:hover{background:var(--band)} .msg:last-child{border-bottom:0}
+.msg input{margin-top:3px;flex:none;accent-color:var(--s1)}
+.msg .body{flex:1;min-width:0}
+.msg .r1{display:flex;align-items:baseline;gap:8px}
+.msg .who{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msg time{margin-left:auto;font-size:12px;color:var(--mut);white-space:nowrap;font-variant-numeric:tabular-nums}
+.msg .txt{color:var(--ink2);font-size:13px;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap;word-break:break-word}
+.msg.open .txt{display:block;-webkit-line-clamp:unset;color:var(--ink)}
+.msg.unread .who::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--s1);margin-right:6px;vertical-align:2px}
+.msg .meta{font-size:11.5px;color:var(--mut);margin-top:6px}
+.msg .acts{display:none;gap:8px;margin-top:10px}
+.msg.open .acts{display:flex}
+.msg .txt a{color:var(--s1);text-decoration:underline;text-underline-offset:2px;word-break:break-all}
+.otp{font:650 20px/1.25 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.14em;color:var(--ink);background:var(--wash);border:0;border-radius:7px;padding:2px 6px 2px 9px;margin:2px 2px;cursor:copy;vertical-align:-2px;display:inline-flex;align-items:center;gap:8px}
+.otp::after{content:"复制";font:600 11px/1 system-ui,sans-serif;letter-spacing:0;color:var(--surface);background:var(--s1);border-radius:5px;padding:4px 6px}
+.otp.done::after{content:"已复制 ✓";background:var(--good)}
+.otp:hover{box-shadow:0 0 0 1px var(--s1)}
+.sms-foot{font-size:11.5px;padding:10px 18px;border-top:1px solid var(--grid)}
+/* details */
+dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0 24px;margin:0}
+dl div{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--grid);font-size:13px}
+dt{color:var(--ink2)} dd{margin:0;font-weight:500;text-align:right;word-break:break-all}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td{padding:8px 0;border-bottom:1px solid var(--grid);vertical-align:top}
+td:first-child{color:var(--mut);width:150px;font-variant-numeric:tabular-nums;white-space:nowrap;padding-right:12px}
+tr:last-child td{border-bottom:0}
+.empty{color:var(--mut);font-size:13px;padding:6px 0}
+@media (max-width:560px){.hero{grid-template-columns:1fr}.sig{border-left:0;padding-left:0;border-top:1px solid var(--grid);padding-top:12px}.tile .v{font-size:22px}td:first-child{width:auto}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div>
+      <h1>SIM Anywhere</h1>
+      <div class="live"><span class="dot" id="dot"></span><span id="upd">加载中…</span></div>
+    </div>
+    <div class="tools">
+      <a class="icon-btn" href="api.html" title="JSON API 文档" style="display:grid;place-items:center;text-decoration:none;width:auto;padding:0 10px;font-size:12.5px">API</a>
+      <button class="icon-btn" id="theme" title="切换明暗主题" aria-label="切换明暗主题">◐</button>
+    </div>
+  </div>
+
+  <div class="alert" id="alert" role="alert"></div>
+
+  <nav class="tabs">
+    <div class="tabbar" role="tablist"><a href="#link" data-tab="link" role="tab">链路</a><a href="#carrier" data-tab="carrier" role="tab">运营商</a><a href="#sms" data-tab="sms" role="tab">短信<span class="cnt" id="unread"></span></a></div>
+    <div class="seg" id="range">
+      <button data-w="3600">1 小时</button><button data-w="21600">6 小时</button><button data-w="86400">24 小时</button><button data-w="604800">7 天</button>
+    </div>
+  </nav>
+
+  <div id="tab-link" role="tabpanel">
+    <section class="card hero" aria-label="总体状态">
+      <div>
+        <div class="verdict"><div class="badge" id="badge">·</div><div><div class="t" id="vt">—</div><div class="s" id="vs"></div></div></div>
+        <div class="facts" id="facts"></div>
+      </div>
+      <a class="sig" href="#carrier" aria-label="信号等级，查看运营商">
+        <div class="bars"><i style="height:30%"></i><i style="height:52%"></i><i style="height:76%"></i><i style="height:100%"></i></div>
+        <div><div class="g grade">—</div><div class="gs">查看运营商 →</div></div>
+      </a>
+    </section>
+    <div class="tiles" id="tiles"></div>
+    <section class="card" style="margin-bottom:12px">
+      <div class="chart-h"><h2>链路可用性</h2><div class="tl-legend">
+        <span class="pill" style="--c:var(--good)">正常</span><span class="pill" style="--c:var(--warn)">注册异常</span><span class="pill" style="--c:var(--crit)">中断</span><span class="pill">无数据</span></div></div>
+      <div class="avail" id="avail"></div>
+      <div class="tl" id="tl"></div>
+      <div class="tl-foot"><span id="tl0"></span><span id="tl1"></span></div>
+    </section>
+    <div class="grid2">
+      <section class="card"><div class="chart-h"><h2>吞吐 · usb0</h2><div class="legend"><span style="--c:var(--s1)">下行</span><span style="--c:var(--s2)">上行</span></div></div><div class="plot" id="c_tp"></div></section>
+      <section class="card"><div class="chart-h"><h2>模组温度 · °C</h2></div><div class="plot" id="c_t"></div></section>
+      <section class="card"><h2 style="margin-bottom:6px">设备</h2><dl id="details"></dl></section>
+      <section class="card" aria-label="Clash 集成">
+        <div class="chart-h"><h2>Clash 集成</h2><span class="mut" id="clashState">加载中…</span></div>
+        <dl id="clash"></dl>
+      </section>
+      <section class="card"><h2 style="margin-bottom:6px">最近事件</h2><div id="events"></div></section>
+    </div>
+  </div>
+
+  <div id="tab-carrier" role="tabpanel" hidden>
+    <section class="card hero" aria-label="运营商">
+      <div>
+        <div class="verdict"><div class="badge" id="cbadge" style="background:var(--s1)">4G</div><div><div class="t" id="ct">—</div><div class="s" id="cs"></div></div></div>
+        <div class="facts" id="cfacts"></div>
+      </div>
+      <div class="sig">
+        <div class="bars"><i style="height:30%"></i><i style="height:52%"></i><i style="height:76%"></i><i style="height:100%"></i></div>
+        <div><div class="g grade">—</div><div class="gs">综合 RSRP 与 SINR</div></div>
+      </div>
+    </section>
+    <div class="tiles" id="ctiles"></div>
+    <div class="grid2">
+      <section class="card"><div class="chart-h"><h2>信号强度 · dBm</h2><div class="legend"><span style="--c:var(--s1)">RSRP</span><span style="--c:var(--s2)">RSSI</span></div></div><div class="plot" id="c_sig"></div></section>
+      <section class="card"><div class="chart-h"><h2>信号质量 · dB</h2><div class="legend"><span style="--c:var(--s1)">SINR</span><span style="--c:var(--s2)">RSRQ</span></div></div><div class="plot" id="c_q"></div></section>
+      <section class="card"><h2 style="margin-bottom:6px">网络与地址</h2><dl id="net"></dl></section>
+      <section class="card"><h2 style="margin-bottom:6px">服务小区</h2><dl id="cell"></dl></section>
+    </div>
+  </div>
+
+  <div id="tab-sms" role="tabpanel" hidden>
+    <section class="card sms" aria-label="短信">
+      <div class="sms-h">
+        <h2 class="h">短信</h2>
+        <div class="seg" id="smsbox"><button data-box="in" class="on">收件箱</button><button data-box="out">已发送</button></div>
+        <div class="sp"></div>
+        <button class="btn" id="smsSync" title="立即从模组读取新短信">同步</button>
+        <button class="btn pri" id="smsNew">写短信</button>
+      </div>
+      <form id="compose" class="compose" hidden autocomplete="off">
+        <input id="cto" inputmode="tel" placeholder="收件人号码，如 10086 或 +1 202-555-0147" required pattern="\+?[0-9 \-]{3,20}">
+        <textarea id="ctext" rows="4" placeholder="短信内容" required></textarea>
+        <div class="compose-f"><span class="mut" id="cinfo">0 字</span><span class="sp"></span>
+          <button type="button" class="btn" id="ccancel">取消</button><button type="submit" class="btn pri" id="csend">发送</button></div>
+      </form>
+      <div class="bulk" id="bulk" hidden><span id="bulkn"></span><span class="sp"></span>
+        <button class="btn" data-bulk="read">标为已读</button><button class="btn" data-bulk="unread">标为未读</button><button class="btn danger" data-bulk="delete">删除</button><button class="btn" data-bulk="clear">取消</button></div>
+      <div class="sms-msg" id="smsmsg" hidden></div>
+      <ul class="msgs" id="msgs"></ul>
+      <div class="sms-foot mut">模组收到的短信每分钟移入本机归档，模组存储不再占用。</div>
+    </section>
+  </div>
+</div>
+
+<script>
+addEventListener('error',e=>{const a=document.getElementById('alert');if(a){a.classList.add('on');a.textContent='页面脚本出错：'+e.message}});
+addEventListener('unhandledrejection',e=>{const a=document.getElementById('alert');if(a){a.classList.add('on');a.textContent='页面脚本出错：'+(e.reason&&e.reason.message||e.reason)}});
+const $=id=>document.getElementById(id);
+const RANGES=[3600,21600,86400,604800];
+// all data comes from the JSON API (spec: openapi.json)
+const API='/cgi-bin/sim-anywhere-api/';
+async function api(method,path,body){
+  const r=await fetch(API+path,{method,cache:'no-store',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
+  const j=await r.json().catch(()=>({error:`HTTP ${r.status}`}));
+  if(!r.ok)throw new Error(j.error||`HTTP ${r.status}`);return j;
+}
+const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+let WIN=+new URLSearchParams(location.search).get('w')||+store.get('dongle.win')||86400, DATA=[], S=null, TAB='link', HAVE=0;
+let CLASH=null;
+const last=a=>a[a.length-1];
+const num=v=>(v===''||v==null||isNaN(+v))?null:+v;
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const p2=n=>String(n).padStart(2,'0');
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ---------- grading ---------- */
+// level 4 优 / 3 良 / 2 中 / 1 差
+const G={rsrp:[-80,-90,-100],sinr:[20,13,0],rsrq:[-10,-15,-20]};
+const lvl=(k,v)=>v==null?null:(v>=G[k][0]?4:v>=G[k][1]?3:v>=G[k][2]?2:1);
+const LV={4:['优','var(--good)'],3:['良','var(--good)'],2:['中','var(--warn)'],1:['差','var(--crit)']};
+const tempLv=t=>t==null?null:t<60?['正常','var(--good)']:t<75?['偏高','var(--warn)']:['过热','var(--crit)'];
+const pill=(txt,c)=>txt?`<span class="pill" style="--c:${c}">${txt}</span>`:'';
+
+/* ---------- formatting ---------- */
+function fmtT(t,span){const d=new Date(t*1000);
+  return span>172800?`${p2(d.getMonth()+1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`:`${p2(d.getHours())}:${p2(d.getMinutes())}`;}
+function fmtRate(b){if(b==null)return '—';const u=['B/s','KB/s','MB/s'];let i=0;while(b>=1024&&i<2){b/=1024;i++}return (b<10&&i?b.toFixed(1):Math.round(b))+' '+u[i];}
+function fmtBytes(b){if(b==null)return '—';const u=['B','KB','MB','GB','TB'];let i=0;while(b>=1024&&i<4){b/=1024;i++}return (b<10&&i?b.toFixed(2):b<100&&i?b.toFixed(1):Math.round(b))+' '+u[i];}
+function fmtDur(s){if(s==null)return '—';const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  return d?`${d} 天 ${h} 小时`:h?`${h} 小时 ${m} 分`:`${m} 分钟`;}
+const OPER=o=>o?({CHINA_MOBILE:'中国移动',CHN_CT:'中国电信',CHN_UNICOM:'中国联通',CHINA_UNICOM:'中国联通',CHINA_TELECOM:'中国电信'}[o]||o.replace(/_/g,' ')):null;
+const RRC={NOCONN:'空闲',CONNECT:'已连接',SEARCH:'搜网中',LIMSRV:'受限服务'};
+const SIM={ready:'已就绪',no_sim:'未插卡',locked:'PIN 锁定',unknown:'未知'};
+
+/* ---------- data ---------- */
+const rowsOf=h=>h.rows.map(c=>{const o={};h.fields.forEach((k,i)=>o[k]=c[i]);o.t=o.epoch;return o});
+const inWin=()=>{if(!DATA.length)return [];const t0=last(DATA).t-WIN;let i=DATA.length;while(i>0&&DATA[i-1].t>=t0)i--;return DATA.slice(i);};
+function rates(rows,key){const out=[];for(let i=1;i<rows.length;i++){const a=rows[i-1],b=rows[i],dt=b.t-a.t,d=num(b[key])-num(a[key]);
+  out.push({t:b.t,y:(dt>0&&dt<=180&&d>=0&&num(a[key])!=null&&num(b[key])!=null)?d/dt:null});}return out;}
+function state(r){
+  if(num(r.present)!==1||num(r.netifd_up)!==1||r.sim==='no_sim'||r.sim==='locked')return 'crit';
+  // link up; only a known non-registered CEREG state is an anomaly (empty = AT data missing)
+  return (r.reg==null||r.reg===1||r.reg===5)?'good':'warn';
+}
+
+/* ---------- line chart with shared-x hover ---------- */
+function lineChart(el,series,o={}){
+  const W=el.clientWidth,H=el.clientHeight,PL=40,PR=8,PT=8,PB=22;
+  if(!DATA.length||W<50){el.innerHTML='';return}
+  const t1=last(DATA).t,t0=t1-WIN;
+  const ys=[];series.forEach(s=>s.pts.forEach(p=>p.y!=null&&ys.push(p.y)));
+  let lo=o.min??Math.min(...ys),hi=Math.max(...ys);
+  if(!ys.length){lo=0;hi=1}
+  if(o.min==null){const pad=(hi-lo)*.12||2;lo-=pad;hi+=pad}else{hi+=(hi-lo)*.08||1}
+  const step=nice((hi-lo)/4);lo=Math.floor(lo/step)*step;hi=Math.ceil(hi/step)*step;
+  const X=t=>PL+(t-t0)/WIN*(W-PL-PR),Y=y=>PT+(1-(y-lo)/(hi-lo))*(H-PT-PB);
+  let s=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(o.label||'')}">`;
+  (o.bands||[]).forEach(b=>{const a=Math.max(lo,b[0]),z=Math.min(hi,b[1]);if(z>a)s+=`<rect x="${PL}" width="${W-PL-PR}" y="${Y(z)}" height="${Y(a)-Y(z)}" fill="var(--band)"/>`});
+  for(let y=lo;y<=hi+1e-9;y+=step){s+=`<line x1="${PL}" x2="${W-PR}" y1="${Y(y)}" y2="${Y(y)}" stroke="${y===lo?'var(--axis)':'var(--grid)'}" stroke-width="1"/><text x="${PL-6}" y="${Y(y)+3.5}" text-anchor="end">${o.fmtY?o.fmtY(y):+y.toFixed(1)}</text>`}
+  const nx=W<420?3:5;for(let i=0;i<nx;i++){const t=t0+WIN*(i+.5)/nx;s+=`<text x="${X(t)}" y="${H-5}" text-anchor="middle">${fmtT(t,WIN)}</text>`}
+  series.forEach(se=>{let d='',pen=false,prev=null;
+    se.pts.forEach(p=>{if(p.y==null||p.t<t0||(prev&&p.t-prev>180)){pen=false;if(p.y==null){prev=null;return}}
+      d+=(pen?'L':'M')+X(p.t).toFixed(1)+' '+Y(p.y).toFixed(1);pen=true;prev=p.t});
+    if(d)s+=`<path d="${d}" fill="none" stroke="${se.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;});
+  if(!ys.length)s+=`<text x="${(W+PL)/2}" y="${H/2}" text-anchor="middle">该时间段无数据</text>`;
+  s+=`<g class="hov" style="display:none"><line y1="${PT}" y2="${H-PB}" stroke="var(--axis)"/>${series.map(se=>`<circle r="4" fill="${se.color}" stroke="var(--surface)" stroke-width="2"/>`).join('')}</g></svg><div class="tip"></div>`;
+  el.innerHTML=s;
+  const g=el.querySelector('.hov'),line=g.querySelector('line'),dots=g.querySelectorAll('circle'),tip=el.querySelector('.tip');
+  const ts=series[0].pts.map(p=>p.t);
+  const move=e=>{const r=el.getBoundingClientRect(),cx=(e.touches?e.touches[0].clientX:e.clientX)-r.left;
+    if(cx<PL||!ts.length){hide();return}
+    const t=t0+(cx-PL)/(W-PL-PR)*WIN;let i=bis(ts,t);if(i>0&&Math.abs(ts[i-1]-t)<Math.abs(ts[i]-t))i--;i=Math.min(i,ts.length-1);
+    const x=X(ts[i]);g.style.display='';line.setAttribute('x1',x);line.setAttribute('x2',x);
+    let rows='';series.forEach((se,k)=>{const p=se.pts[i];const ok=p&&p.y!=null;dots[k].style.display=ok?'':'none';
+      if(ok){dots[k].setAttribute('cx',x);dots[k].setAttribute('cy',Y(p.y))}
+      rows+=`<div class="row"><span class="sw" style="--c:${se.color}"></span>${se.name}<b>${ok?(o.fmtV?o.fmtV(p.y):p.y+(o.unit||'')):'—'}</b></div>`;});
+    tip.innerHTML=`<div class="tt">${fmtT(ts[i],2e5)}</div>${rows}`;tip.style.display='block';
+    const tw=tip.offsetWidth;tip.style.left=Math.max(0,Math.min(W-tw,x+12>W-tw?x-tw-12:x+12))+'px';tip.style.top='4px';};
+  const hide=()=>{g.style.display='none';tip.style.display='none'};
+  el.onmousemove=move;el.ontouchstart=el.ontouchmove=move;el.onmouseleave=el.ontouchend=hide;
+}
+function nice(x){const e=Math.pow(10,Math.floor(Math.log10(x||1))),f=x/e;return (f<=1?1:f<=2?2:f<=2.5?2.5:f<=5?5:10)*e}
+function bis(a,t){let l=0,h=a.length;while(l<h){const m=(l+h)>>1;if(a[m]<t)l=m+1;else h=m}return l}
+
+function spark(rows,key){
+  const pts=rows.slice(-120).map(r=>num(r[key])).filter(v=>v!=null);
+  if(pts.length<2)return '<svg class="spark"></svg>';
+  const lo=Math.min(...pts),hi=Math.max(...pts),W=100,H=30;
+  const d=pts.map((v,i)=>`${i?'L':'M'}${(i/(pts.length-1)*W).toFixed(2)} ${(H-3-(hi===lo?.5:(v-lo)/(hi-lo))*(H-6)).toFixed(2)}`).join('');
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><path d="${d}" fill="none" stroke="var(--s1)" stroke-width="1.5" vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>`;
+}
+
+/* ---------- sections ---------- */
+function renderHero(s){
+  let k,t,sub;
+  if(s.present!=1){k='crit';t='未检测到 Dongle';sub='USB 2ca3:4006 不在总线上'}
+  else if(s.sim==='no_sim'){k='crit';t='未插 SIM 卡';sub='模组在线，但读不到 SIM'}
+  else if(s.sim==='locked'){k='crit';t='SIM 已锁定';sub='需要输入 PIN / PUK'}
+  else if(s.netifd_up!=1){k='crit';t='链路中断';sub='usb0 接口未建立 (netifd down)'}
+  else if(!s.at_port){k='warn';t='在线 · 无模组数据';sub='串口未就绪，无法读取 AT 信息'}
+  else if(s.reg!=1&&s.reg!=5){k='warn';t='网络注册异常';sub=`CEREG 状态 ${s.reg??'—'}`}
+  else{k='good';t='在线';sub=[OPER(s.oper),s.band?`LTE B${s.band}`:null,s.reg==5?'漫游':'本网',RRC[s.rrc]||s.rrc].filter(Boolean).join(' · ')}
+  const col={good:'var(--good)',warn:'var(--warn)',crit:'var(--crit)'}[k];
+  $('badge').style.background=col;$('badge').textContent=k==='good'?'✓':'!';
+  $('vt').textContent=t;$('vs').textContent=sub;
+  $('facts').innerHTML=[
+    ['连续在线',s.netifd_up==1?fmtDur(s.link_uptime):'—'],
+    ['本次开机累计',`↓ ${fmtBytes(s.rx)} · ↑ ${fmtBytes(s.tx)}`],
+    ['USB 断连',(s.disconnects??'—')+' 次'],
+  ].map(f=>`<span>${f[0]} <b class="num">${esc(f[1])}</b></span>`).join('');
+  const a=lvl('rsrp',s.rsrp),b=lvl('sinr',s.sinr),L=(a&&b)?Math.min(a,b):(a||b);
+  document.querySelectorAll('.bars').forEach(bs=>[...bs.children].forEach((el,i)=>el.style.background=L&&i<L?LV[L][1]:'var(--grid)'));
+  document.querySelectorAll('.grade').forEach(el=>el.textContent=L?`信号${LV[L][0]}`:'—');
+  const al=$('alert');al.classList.toggle('on',k==='crit');al.textContent=k==='crit'?`${t}：${sub}`:'';
+}
+
+function renderTiles(s,rows){
+  const tp=last(rates(rows,'rx')),tu=last(rates(rows,'tx'));
+  const tot=k=>{let sum=0;for(let i=1;i<rows.length;i++){const d=num(rows[i][k])-num(rows[i-1][k]);if(d>0)sum+=d}return sum};
+  const tl=tempLv(s.temp);
+  $('tiles').innerHTML=
+    `<div class="card tile"><div class="k">当前吞吐</div><div class="v num" style="font-size:18px;margin-top:8px">↓ ${fmtRate(tp&&tp.y)}</div><div class="v num" style="font-size:18px;margin-top:2px">↑ ${fmtRate(tu&&tu.y)}</div><div class="sub">区间合计 ↓ ${fmtBytes(tot('rx'))} · ↑ ${fmtBytes(tot('tx'))}</div></div>`+
+    tile('模组温度',s.temp,'°C',tl?pill(tl[0],tl[1]):'','',spark(rows,'temp'));
+}
+const tile=(k,v,u,p,sub,sp)=>`<div class="card tile"><div class="k">${k}${p}</div><div class="v num">${v??'—'}${v!=null&&u?`<small>${u}</small>`:''}</div><div class="sub">${sub||''}</div>${sp||''}</div>`;
+
+function renderCarrier(s,rows){
+  const op=OPER(s.oper);
+  $('ct').textContent=op||(s.sim==='ready'?'未注册网络':'无 SIM');
+  $('cs').textContent=[s.band?`LTE B${s.band}`:null,s.reg==1?'本网':s.reg==5?'漫游':null,RRC[s.rrc]||s.rrc,s.apn?`APN ${s.apn}`:null].filter(Boolean).join(' · ')||'—';
+  $('cfacts').innerHTML=[['SIM',SIM[s.sim]||s.sim||'—'],['运营商 IP',s.wan_ip||'—'],['RSSI',s.rssi!=null?s.rssi+' dBm':'—']]
+    .map(f=>`<span>${f[0]} <b class="num">${esc(f[1])}</b></span>`).join('');
+  const pl=(key,v)=>{const l=lvl(key,v);return l?pill(LV[l][0],LV[l][1]):''};
+  $('ctiles').innerHTML=
+    tile('RSRP 参考信号接收功率',s.rsrp,'dBm',pl('rsrp',s.rsrp),'优 ≥ −80 · 良 ≥ −90 · 中 ≥ −100',spark(rows,'rsrp'))+
+    tile('SINR 信噪比',s.sinr,'dB',pl('sinr',s.sinr),'优 ≥ 20 · 良 ≥ 13 · 中 ≥ 0',spark(rows,'sinr'))+
+    tile('RSRQ 参考信号质量',s.rsrq,'dB',pl('rsrq',s.rsrq),'优 ≥ −10 · 良 ≥ −15 · 中 ≥ −20',spark(rows,'rsrq'));
+  const dl=(id,items)=>$(id).innerHTML=items.map(i=>`<div><dt>${i[0]}</dt><dd class="num">${esc(i[1]??'—')}</dd></div>`).join('');
+  dl('net',[['运营商分配 IPv4',s.wan_ip],['运营商分配 IPv6',s.wan_ip6],['APN',s.apn],['DNS',s.dns],
+    ['Dongle 内网地址',s.usb0_ip],['出口网卡 usb0',s.usb0_carrier==1?'有载波':'无载波']]);
+  dl('cell',[['运营商',op],['注册',s.reg==1?'本网':s.reg==5?'漫游（正常）':s.reg],['频段',s.band&&`B${s.band}`],['EARFCN',s.earfcn],
+    ['小区 ID',s.cellid],['PCI',s.pci],['RRC 状态',RRC[s.rrc]||s.rrc]]);
+}
+
+function renderTimeline(rows){
+  const el=$('tl');if(!rows.length){el.innerHTML='';return}
+  const t1=last(DATA).t,t0=t1-WIN,W=1000,X=t=>(t-t0)/WIN*W;
+  const col={good:'var(--good)',warn:'var(--warn)',crit:'var(--crit)'};
+  let s=`<svg viewBox="0 0 ${W} 28" preserveAspectRatio="none">`,run=null,cnt={good:0,warn:0,crit:0},outs=0,prevK=null;
+  const flush=end=>{if(run)s+=`<rect x="${X(run.a).toFixed(2)}" width="${Math.max(1.5,X(end)-X(run.a)).toFixed(2)}" y="0" height="28" fill="${col[run.k]}"><title>${fmtT(run.a,2e5)} – ${fmtT(end,2e5)}</title></rect>`};
+  rows.forEach((r,i)=>{const k=state(r);cnt[k]++;if(k==='crit'&&prevK&&prevK!=='crit')outs++;prevK=k;
+    const gap=i&&r.t-rows[i-1].t>180;
+    if(!run||run.k!==k||gap){flush(gap?rows[i-1].t+60:r.t);run={k,a:r.t}}});
+  flush(t1+60);el.innerHTML=s+'</svg>';
+  const exp=Math.round(WIN/60),have=rows.length,ok=cnt.good+cnt.warn;
+  $('avail').innerHTML=[
+    [have?(ok/have*100).toFixed(ok===have?0:2)+'%':'—','在线率（不含无数据）'],
+    [outs,'中断次数'],
+    [fmtDur(cnt.crit*60),'中断时长'],
+    [Math.min(100,have/exp*100).toFixed(0)+'%','采样覆盖（灰色为无数据）'],
+  ].map(x=>`<div><div class="n num">${x[0]}</div><div class="l">${x[1]}</div></div>`).join('');
+  $('tl0').textContent=fmtT(t0,2e5);$('tl1').textContent='现在';
+}
+
+function renderCharts(rows){
+  const P=k=>rows.map(r=>({t:r.t,y:num(r[k])}));
+  const s1=css('--s1'),s2=css('--s2');
+  if(TAB==='carrier'){
+  lineChart($('c_sig'),[{name:'RSRP',color:s1,pts:P('rsrp')},{name:'RSSI',color:s2,pts:P('rssi')}],{unit:' dBm',bands:[[-80,0]],label:'RSRP 与 RSSI 趋势'});
+  lineChart($('c_q'),[{name:'SINR',color:s1,pts:P('sinr')},{name:'RSRQ',color:s2,pts:P('rsrq')}],{unit:' dB',bands:[[20,99]],label:'SINR 与 RSRQ 趋势'});
+  return}
+  const rx=rates(rows,'rx'),tx=rates(rows,'tx');
+  lineChart($('c_tp'),[{name:'下行',color:s1,pts:rx},{name:'上行',color:s2,pts:tx}],{min:0,fmtV:fmtRate,fmtY:v=>fmtRate(v).replace('/s',''),label:'usb0 吞吐趋势'});
+  lineChart($('c_t'),[{name:'温度',color:s1,pts:P('temp')}],{unit:' °C',label:'模组温度趋势'});
+}
+
+function renderDetails(s){
+  const items=[
+    ['模组',s.model],['链路 (netifd)',s.netifd_up==1?'up':'down'],
+    ['USB 口 / AT 串口',`${s.usb_port||'—'} / ${s.at_port||'—'}`],['所在节点',s.host_ip||location.hostname],
+    ['最后采样',s.ts],
+  ];
+  $('details').innerHTML=items.map(i=>`<div><dt>${i[0]}</dt><dd class="num">${esc(i[1]??'—')}</dd></div>`).join('');
+}
+
+function renderEvents(){
+  const ev=[];let p=null;
+  DATA.slice(-20160).forEach(r=>{
+    if(p){
+      const d=num(r.disconnects),pd=num(p.disconnects);
+      if(d!=null&&pd!=null&&d>pd)ev.push([r.ts,`USB 断连 ${d-pd} 次（开机后累计 ${d}）`,'var(--crit)']);
+      if(d!=null&&pd!=null&&d<pd)ev.push([r.ts,'节点重启（断连计数清零）','var(--mut)']);
+      if(r.present!==p.present)ev.push([r.ts,r.present===1?'检测到 Dongle':'Dongle 未检测到',r.present===1?'var(--good)':'var(--crit)']);
+      if(r.netifd_up!==p.netifd_up&&r.netifd_up!=null)ev.push([r.ts,r.netifd_up===1?'链路恢复':'链路中断',r.netifd_up===1?'var(--good)':'var(--crit)']);
+      if(r.sim&&p.sim&&r.sim!==p.sim)ev.push([r.ts,`SIM：${SIM[p.sim]||p.sim} → ${SIM[r.sim]||r.sim}`,'var(--warn)']);
+      if(r.cellid&&p.cellid&&r.cellid!==p.cellid)ev.push([r.ts,`切换小区 ${p.cellid} → ${r.cellid}${r.band!==p.band?`（B${p.band} → B${r.band}）`:''}`,'var(--s1)']);
+    }
+    p=r;});
+  const last=ev.slice(-15).reverse();
+  $('events').innerHTML=last.length?`<table>${last.map(e=>`<tr><td>${esc(e[0])}</td><td>${pill(esc(e[1]),e[2])}</td></tr>`).join('')}</table>`:'<div class="empty">近两周无事件</div>';
+}
+
+function render(){
+  if(!DATA.length&&!S){return}
+  const rows=inWin(),s=S||last(DATA);
+  renderHero(s);
+  if(TAB==='sms')return;
+  if(TAB==='carrier')renderCarrier(s,rows);else{renderTiles(s,rows);renderTimeline(rows);renderDetails(s);renderEvents()}
+  renderCharts(rows);
+}
+function tick(){
+  if(!S)return;const age=Math.round(Date.now()/1000-S.epoch);
+  $('upd').textContent=`采样于 ${S.ts.slice(11,16)} · ${age<60?'刚刚':Math.floor(age/60)+' 分钟前'} · 每分钟采样`;
+  $('dot').classList.toggle('stale',age>180);
+}
+
+async function clashLoad(){
+  try{ CLASH=await api('GET','proxy/status'); }
+  catch(e){ CLASH={error:e.message}; }
+  renderClash();
+}
+function renderClash(){
+  const el=$('clash'), st=$('clashState');
+  if(!el)return;
+  if(!CLASH){st.textContent='加载中…';el.innerHTML='';return}
+  if(CLASH.error){st.textContent='读取失败';el.innerHTML=`<div class="empty">${esc(CLASH.error)}</div>`;return}
+  const integrated=!!CLASH.integrated;
+  st.innerHTML=integrated?pill('已集成','var(--good)'):pill('未集成','var(--mut)');
+  if(!integrated){el.innerHTML='<div class="empty">未找到运行中的 Mihomo/Clash</div>';return}
+  const core=[CLASH.core,CLASH.version].filter(Boolean).join(' ')||'—';
+  const exit=CLASH.exit?`${CLASH.exit}${CLASH.interface?` (${CLASH.interface})`:''}`:'未找到 4G 出口代理';
+  const items=[['状态',CLASH.running?'运行中':'已停止'],['核心',core],['PID',CLASH.pid??'—'],['GID',CLASH.gid??'—'],['4G 出口',exit]];
+  el.innerHTML=items.map(i=>`<div><dt>${i[0]}</dt><dd class="num">${esc(i[1])}</dd></div>`).join('');
+}
+
+async function load(){
+  try{
+    S=await api('GET','status?seconds=1');  // NDJSON stream: one record, then the stream ends
+    // fetch the selected range once (a 7-day range is ~2 MB), then append only new samples
+    if(!DATA.length||WIN>HAVE){DATA=rowsOf(await api('GET','history?window='+WIN));HAVE=WIN}
+    else if(S.epoch>last(DATA).t){DATA.push(...rowsOf(await api('GET','history?since='+last(DATA).t)));
+      const t0=last(DATA).t-HAVE;let i=0;while(i<DATA.length&&DATA[i].t<t0)i++;if(i)DATA.splice(0,i)}
+  }catch(e){const al=$('alert');al.classList.add('on');al.textContent='读取数据失败：'+e;return}
+  render();tick();
+}
+
+/* ---------- tabs ---------- */
+function setTab(){
+  TAB=({'#carrier':'carrier','#sms':'sms'})[location.hash]||'link';
+  document.querySelectorAll('.tabbar a').forEach(a=>{const on=a.dataset.tab===TAB;a.classList.toggle('on',on);a.setAttribute('aria-selected',on)});
+  ['link','carrier','sms'].forEach(t=>$('tab-'+t).hidden=TAB!==t);
+  $('range').style.visibility=TAB==='sms'?'hidden':'';
+  render();
+}
+addEventListener('hashchange',setTab);
+
+/* ---------- SMS text: links and verification codes ---------- */
+const URL_RE=/(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+|\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:com|net|org|sg|cn|io|ly|me|co|my|info|app|link|gl)\b(?:\/[^\s<>"']*)?)/;
+const OTP_KW=/验证码|校验码|动态码|确认码|\b(?:verification|code|OTP|passcode|PIN)\b/i;
+const OTP_RE=/(?:G-)?\d{4,8}/;
+// a code is not part of a number, URL, amount or phone number (checked here: no regex lookbehind before Safari 16.4)
+const isOtp=(t,a,b)=>!/[\w.\/:$-]/.test(t[a-1]||'')&&!/\d $/.test(t.slice(Math.max(0,a-2),a))&&!/^([\w%\/:]|\.\d| \d)/.test(t.slice(b,b+2));
+function fmtSms(t){
+  const re=new RegExp(URL_RE.source+(OTP_KW.test(t)?'|'+OTP_RE.source:''),'gi');
+  let out='',i=0;
+  for(const m of t.matchAll(re)){
+    if(m.index<i)continue;
+    let s=m[0];out+=esc(t.slice(i,m.index));
+    if(m[1]){s=s.replace(/[.,;:!?)\]，。！？）]+$/,'');
+      out+=`<a href="${esc(/^https?:/i.test(s)?s:'http://'+s)}" target="_blank" rel="noopener noreferrer">${esc(s)}</a>`}
+    else if(isOtp(t,m.index,m.index+s.length))out+=`<button type="button" class="otp" data-copy="${esc(s)}" title="复制验证码">${esc(s)}</button>`;
+    else out+=esc(s);
+    i=m.index+s.length;
+  }
+  return out+esc(t.slice(i));
+}
+function copyText(t){
+  if(navigator.clipboard&&isSecureContext)return navigator.clipboard.writeText(t);
+  const a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;opacity:0';document.body.appendChild(a);a.select();
+  const ok=document.execCommand('copy');a.remove();return ok?Promise.resolve():Promise.reject(new Error('浏览器不允许复制'));
+}
+
+let MSGS=[],BOX='in',SEL=new Set(),OPEN=null;
+function smsNote(t,err){const el=$('smsmsg');el.hidden=!t;el.textContent=t||'';el.classList.toggle('err',!!err)}
+async function smsLoad(){
+  try{
+    const j=await api('GET','sms');
+    MSGS=j.messages.map(m=>({...m,key:m.id,dir:m.box,num:m.number,ts:m.epoch*1000,
+      text:m.text+(m.parts<m.total?`\n（长短信缺 ${m.total-m.parts} 段）`:'')}));
+  }catch(e){smsNote('读取短信失败：'+e.message,true)}
+  smsRender();
+}
+const fmtFull=ms=>{const d=new Date(ms);return `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`};
+function fmtWhen(ms){const d=new Date(ms),n=new Date();
+  if(d.toDateString()===n.toDateString())return `${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  return d.getFullYear()===n.getFullYear()?`${d.getMonth()+1}月${d.getDate()}日`:`${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()}`;}
+function smsRender(){
+  const unread=MSGS.filter(m=>m.dir==='in'&&!m.read).length;$('unread').textContent=unread||'';
+  document.querySelectorAll('#smsbox button').forEach(b=>{b.classList.toggle('on',b.dataset.box===BOX);
+    b.textContent=b.dataset.box==='in'?`收件箱${unread?` · ${unread}`:''}`:'已发送'});
+  const list=MSGS.filter(m=>m.dir===BOX);
+  [...SEL].forEach(k=>{if(!list.some(m=>m.key===k))SEL.delete(k)});
+  $('bulk').hidden=!SEL.size;$('bulkn').textContent=`已选 ${SEL.size} 条`;
+  $('msgs').innerHTML=list.length?list.map(m=>`<li class="msg${m.read?'':' unread'}${OPEN===m.key?' open':''}" data-k="${esc(m.key)}">
+    <input type="checkbox" aria-label="选择" ${SEL.has(m.key)?'checked':''}>
+    <div class="body"><div class="r1"><span class="who">${BOX==='out'?'至 ':''}${esc(m.num)}</span><time title="${fmtFull(m.ts)}">${fmtWhen(m.ts)}</time></div>
+    <div class="txt">${fmtSms(m.text)}</div>
+    <div class="meta">${fmtFull(m.ts)}${m.total>1?` · 长短信 ${m.total} 段`:''}</div>
+    <div class="acts">${BOX==='in'?`<button class="btn" data-act="toggle">${m.read?'标为未读':'标为已读'}</button><button class="btn" data-act="reply">回复</button>`:`<button class="btn" data-act="again">再次编辑</button>`}<button class="btn danger" data-act="delete">删除</button></div></div></li>`).join('')
+    :`<li class="empty" style="padding:24px 18px">${BOX==='in'?'收件箱为空':'没有已发送的短信'}</li>`;
+}
+async function smsDo(keys,action,read){
+  if(!keys.length)return;
+  try{action==='delete'?await api('DELETE','sms?ids='+keys.join(',')):await api('PATCH','sms',{ids:keys,read:!!read});smsNote('')}
+  catch(e){smsNote('操作失败：'+e.message,true)}
+  await smsLoad();
+}
+function smsDelete(keys){if(confirm(`从归档中删除 ${keys.length} 条短信？删除后无法恢复。`)){keys.forEach(k=>SEL.delete(k));smsDo(keys,'delete')}}
+$('msgs').onclick=e=>{
+  if(e.target.closest('a'))return;
+  const cp=e.target.closest('[data-copy]');
+  if(cp){copyText(cp.dataset.copy).then(()=>{cp.classList.add('done');setTimeout(()=>cp.classList.remove('done'),1500)},x=>smsNote('复制失败：'+x.message,true));return}
+  const li=e.target.closest('.msg');if(!li)return;const k=li.dataset.k,m=MSGS.find(x=>x.key===k);if(!m)return;
+  if(e.target.matches('input')){e.target.checked?SEL.add(k):SEL.delete(k);smsRender();return}
+  const act=e.target.dataset.act;
+  if(act==='toggle')return smsDo([k],'read',m.read?0:1);
+  if(act==='delete')return smsDelete([k]);
+  if(act==='reply'||act==='again'){compose(m.num,act==='again'?m.text:'');return}
+  if(e.target.closest('.acts')||getSelection().toString())return;
+  OPEN=OPEN===k?null:k;smsRender();
+  if(OPEN&&!m.read&&m.dir==='in')smsDo([k],'read',1);
+};
+document.querySelectorAll('#smsbox button').forEach(b=>b.onclick=()=>{BOX=b.dataset.box;SEL.clear();OPEN=null;smsRender()});
+document.querySelectorAll('[data-bulk]').forEach(b=>b.onclick=()=>{const keys=[...SEL],a=b.dataset.bulk;
+  if(a==='clear'){SEL.clear();smsRender()}else if(a==='delete')smsDelete(keys);else{SEL.clear();smsDo(keys,'read',a==='read'?1:0)}});
+$('smsSync').onclick=async e=>{e.target.disabled=true;try{await api('POST','sms/sync',{});smsNote('')}catch(x){smsNote('同步失败：'+x.message,true)}e.target.disabled=false;smsLoad()};
+
+function compose(to,text){const f=$('compose');f.hidden=false;$('cto').value=to||'';$('ctext').value=text||'';cinfo();(to?$('ctext'):$('cto')).focus()}
+// part count comes from the API (dry run), so the page has no SMS codec of its own
+let ciT;
+function cinfo(){const t=$('ctext').value;clearTimeout(ciT);if(!t){$('cinfo').textContent='0 字';return}
+  ciT=setTimeout(async()=>{try{const e=await api('POST','sms',{to:'10086',text:t,dry_run:true});
+    if(t===$('ctext').value)$('cinfo').textContent=`${[...t].length} 字 · ${e.parts} 条${e.encoding==='ucs2'?' · Unicode 编码':''}${e.parts>1?' · 长短信':''}`}
+    catch(x){$('cinfo').textContent=x.message}},250)}
+$('smsNew').onclick=()=>compose('','');
+$('ccancel').onclick=()=>{$('compose').hidden=true};
+$('ctext').oninput=cinfo;
+$('compose').onsubmit=async e=>{e.preventDefault();
+  const to=$('cto').value.trim(),t=$('ctext').value;if(!t)return;
+  let n;try{n=(await api('POST','sms',{to,text:t,dry_run:true})).parts}catch(x){smsNote(x.message,true);return}
+  if(!confirm(`发送到 ${to}，共 ${n} 条短信。运营商可能收费，确定发送？`))return;
+  const btn=$('csend');btn.disabled=true;btn.textContent='发送中…';smsNote(n>1?`正在发送 ${n} 段长短信…`:'正在发送…');
+  try{await api('POST','sms',{to,text:t});smsNote('已发送');$('compose').hidden=true;BOX='out';}
+  catch(x){smsNote('发送失败：'+x.message,true)}
+  btn.disabled=false;btn.textContent='发送';smsLoad();
+};
+
+document.querySelectorAll('#range button').forEach(b=>{b.classList.toggle('on',+b.dataset.w===WIN);
+  b.onclick=()=>{WIN=+b.dataset.w;saveWin();document.querySelectorAll('#range button').forEach(x=>x.classList.toggle('on',x===b));WIN>HAVE?load():render()}});
+if(!RANGES.includes(WIN)){WIN=86400;document.querySelector('#range [data-w="86400"]').classList.add('on')}
+// remember the range per browser and keep it in the URL, so reloads, bookmarks and node links keep it
+function saveWin(){store.set('dongle.win',WIN);try{history.replaceState(null,'',`?w=${WIN}${location.hash}`)}catch(e){}}
+saveWin();
+const th=store.get('dongle.theme');if(th)document.documentElement.dataset.theme=th;
+$('theme').onclick=()=>{const r=document.documentElement,dark=r.dataset.theme?r.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
+  r.dataset.theme=dark?'light':'dark';store.set('dongle.theme',r.dataset.theme);render()};
+let rz;addEventListener('resize',()=>{clearTimeout(rz);rz=setTimeout(render,120)});
+setTab();load();clashLoad();setInterval(load,10000);setInterval(clashLoad,10000);setInterval(tick,15000);smsLoad();setInterval(smsLoad,60000);
+</script>
+</body>
+</html>

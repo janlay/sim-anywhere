@@ -1,0 +1,13 @@
+{
+  "domain": "dongle_monitor",
+  "name": "SIM Anywhere",
+  "codeowners": [
+    "@janlay"
+  ],
+  "config_flow": true,
+  "documentation": "https://www.home-assistant.io/integrations/dongle_monitor",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "requirements": [],
+  "version": "0.1.0"
+}

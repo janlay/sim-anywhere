@@ -1,0 +1,42 @@
+#!/bin/sh
+# Start the dongle services when the modem is plugged in, stop them when it is removed.
+# Without the modem only the collector (cron) keeps running and records present: 0; the JSON
+# API answers 503 for everything that needs the modem.
+#
+# uhttpd is deliberately not part of this: it serves LuCI as well as the API, so stopping it
+# would take the node off the LAN. It stays up, and the API is what tells a client that there
+# is no dongle.
+#
+# Both dongle services tolerate starting before their serial ports exist: sim-anywhere-calld
+# retries the port every 5 s, and sim-anywhere-vowifid reaches the SIM through dongle-at per
+# request.
+
+case "$ACTION" in add|remove) ;; *) exit 0 ;; esac
+[ "$DEVTYPE" = usb_device ] || exit 0
+case "$PRODUCT" in 2ca3/4006/*) ;; *) exit 0 ;; esac
+
+# Only services enabled at boot (an S link in /etc/rc.d) are started here.
+is_enabled() { [ -n "$(ls /etc/rc.d/S[0-9][0-9]"$1" 2>/dev/null)" ]; }
+
+start_one() {
+	is_enabled "$1" && /etc/init.d/"$1" start
+}
+
+stop_one() {
+	[ -x /etc/init.d/"$1" ] && /etc/init.d/"$1" stop
+}
+
+if [ "$ACTION" = add ]; then
+	# dongle-announce only advertises a node that can answer: the API is up either way, but
+	# the modem is what it would talk about.
+	start_one dongle-announce
+	start_one sim-anywhere-calld
+	start_one sim-anywhere-vowifid
+	logger -t dongle "modem present: services started"
+else
+	# Announce first so the node stops advertising before it stops answering.
+	stop_one dongle-announce
+	stop_one sim-anywhere-calld
+	stop_one sim-anywhere-vowifid
+	logger -t dongle "modem gone: services stopped"
+fi

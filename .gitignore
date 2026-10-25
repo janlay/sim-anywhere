@@ -1,0 +1,10 @@
+build/
+SIMAnywhere.xcodeproj/
+xcuserdata/
+.workbuddy-ai/
+/.env
+**/.env
+**/__pycache__/
+*.py[cod]
+**/PRD.md
+**/ARCH.md

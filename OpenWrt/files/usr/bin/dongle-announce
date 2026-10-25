@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""dongle-announce: advertise this node on the LAN so the SIM Anywhere app finds it.
+
+UCI (/etc/config/dongle, section `discovery`):
+    enabled          '1' broadcasts, anything else keeps the node silent (default)
+    stop_on_connect  '1' pauses the broadcast once an app has connected (default off)
+
+The payload is one JSON datagram:
+
+    {"simanywhere": 1, "name": "<hostname>", "host": "openwrt.local", "port": 80,
+     "scheme": "http", "api": "/cgi-bin/sim-anywhere-api", "model": "Quectel EG25-G"}
+
+`model` (the 4G dongle reported by `ATI`, the same value the API serves under
+`/status`) is included only when a dongle is inserted; it is omitted otherwise.
+
+It goes to the broadcast address of every LAN interface every INTERVAL seconds,
+and back to any client that sends {"simanywhere": 1, "probe": 1} to the port, so
+the app does not have to wait for the next broadcast. The 4G uplink (usb0) and
+loopback are never announced: they are not reachable from the LAN.
+
+With `stop_on_connect` the node stops announcing after an app has connected (the
+API calls `pause`), and stays quiet until `resume` (the LuCI button) or the next
+boot. A manual resume lasts until the next app connects.
+
+The setting is read again every CONFIG_EVERY seconds, so the LuCI switches take
+effect within a few seconds and no service restart is needed.
+
+Usage:
+    dongle-announce            # run the service
+    dongle-announce start      # LuCI 开始广播: clear both flags, set enabled=1
+    dongle-announce stop       # LuCI 停止广播: set the stop flag, set enabled=0
+    dongle-announce pause      # an app connected: stop when stop_on_connect is on
+    dongle-announce resume     # clear the pause flag left by an app
+    dongle-announce status     # JSON state, for the LuCI settings page
+"""
+
+import json
+import os
+import re
+import select
+import socket
+import subprocess
+import sys
+import time
+
+PORT = 8766
+INTERVAL = 5          # seconds between broadcasts
+TICK = 1              # select timeout
+CONFIG_EVERY = 10     # seconds between uci reads of `enabled`
+INFO_EVERY = 60       # seconds between uci reads of the hostname and HTTP port
+PAUSE = "/var/run/dongle-announce.paused"
+STOP = "/var/run/dongle-announce.stopped"
+
+ADDR_RE = re.compile(r"^\d+:\s+(\S+)\s+inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)")
+SKIP_DEV = re.compile(r"^(lo|usb\d+)$")
+TRUE = ("1", "true", "on", "yes")
+
+
+def run(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def uci(name):
+    return run(["uci", "-q", "get", name]).strip()
+
+
+def enabled():
+    return uci("dongle.discovery.enabled") in TRUE
+
+
+def stop_on_connect():
+    return uci("dongle.discovery.stop_on_connect") in TRUE
+
+
+def paused():
+    """True after an app connected. The flag lives in /var/run, so a reboot resumes."""
+    return os.path.exists(PAUSE)
+
+
+def set_paused(value):
+    try:
+        if value:
+            with open(PAUSE, "w") as f:
+                f.write(str(int(time.time())) + "\n")
+        elif os.path.exists(PAUSE):
+            os.remove(PAUSE)
+    except OSError as e:
+        print(f"dongle-announce: cannot change the pause flag: {e}", flush=True)
+
+
+def stopped():
+    """True after 停止广播. Like the pause flag it lives in /var/run, so a reboot resumes.
+
+    It exists so the LuCI button works instantly and reliably: `stop` sets the flag *and*
+    writes `enabled=0` in UCI (which is what survives a reboot), and the daemon tests the
+    flag every second instead of waiting up to CONFIG_EVERY for the next uci read.
+    """
+    return os.path.exists(STOP)
+
+
+def set_stopped(value):
+    try:
+        if value:
+            with open(STOP, "w") as f:
+                f.write(str(int(time.time())) + "\n")
+        elif os.path.exists(STOP):
+            os.remove(STOP)
+    except OSError as e:
+        print(f"dongle-announce: cannot change the stop flag: {e}", flush=True)
+
+
+def set_enabled(value):
+    """Persist the switch in UCI so the choice survives a reboot."""
+    run(["uci", "set", f"dongle.discovery.enabled={value}"])
+    run(["uci", "commit", "dongle"])
+
+
+def hostname():
+    return uci("system.@system[0].hostname") or socket.gethostname()
+
+
+def http_port():
+    """The port uhttpd serves the API on (listen_http is `addr:port`)."""
+    port = uci("uhttpd.main.listen_http").rsplit(":", 1)[-1]
+    return int(port) if port.isdigit() else 80
+
+
+def model():
+    """The dongle model reported by `ATI` and stored in the status file by the collector
+    (`/tmp/dongle-web/status.json`, the same file the API serves under `/status`). Empty
+    when no dongle is inserted, so the field is then omitted from the broadcast."""
+    try:
+        with open("/tmp/dongle-web/status.json") as f:
+            m = json.load(f).get("model")
+        return m if isinstance(m, str) and m.strip() else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def ip_int(ip):
+    a, b, c, d = (int(x) for x in ip.split("."))
+    return (a << 24) | (b << 16) | (c << 8) | d
+
+
+def int_ip(n):
+    return ".".join(str((n >> s) & 255) for s in (24, 16, 8, 0))
+
+
+def mask_of(prefix):
+    return (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF if prefix else 0
+
+
+def broadcast(ip, prefix):
+    return int_ip(ip_int(ip) | (~mask_of(prefix) & 0xFFFFFFFF))
+
+
+def lan_addrs():
+    """(device, ip, prefix) of every IPv4 address that is not loopback or the dongle.
+
+    Secondary addresses are skipped so the same node is not announced twice
+    when a virtual address is configured.
+    """
+    out = []
+    for line in run(["ip", "-4", "-o", "addr", "show"]).splitlines():
+        m = ADDR_RE.match(line)
+        if not m or SKIP_DEV.match(m.group(1)) or " secondary " in line:
+            continue
+        out.append((m.group(1), m.group(2), int(m.group(3))))
+    return out
+
+
+def payload(ip, name, port, model=""):
+    p = {"simanywhere": 1, "name": name, "host": ip, "port": port,
+         "scheme": "http", "api": "/cgi-bin/sim-anywhere-api"}
+    if model:
+        p["model"] = model
+    return json.dumps(p, ensure_ascii=False).encode()
+
+
+def send(sock, ip, port, data):
+    try:
+        sock.sendto(data, (ip, port))
+    except OSError:
+        pass
+
+
+def host_for(sender, addrs):
+    """The local address on the same subnet as the client, so the reply is routable."""
+    n = ip_int(sender)
+    for _, ip, prefix in addrs:
+        m = mask_of(prefix)
+        if ip_int(ip) & m == n & m:
+            return ip
+    return addrs[0][1] if addrs else None
+
+
+def answer(sock, addrs, name, port, model, on):
+    """Reply to the probe packets that are already queued, then return."""
+    while True:
+        try:
+            data, peer = sock.recvfrom(2048)
+        except OSError:
+            return
+        if not on:
+            continue
+        try:
+            msg = json.loads(data.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if not isinstance(msg, dict) or not msg.get("probe"):
+            continue
+        ip = host_for(peer[0], addrs)
+        if ip:
+            send(sock, peer[0], peer[1], payload(ip, name, port, model))
+
+
+def state():
+    return {"enabled": enabled(), "stop_on_connect": stop_on_connect(),
+            "paused": paused() and stop_on_connect(), "stopped": stopped(), "port": PORT,
+            "interfaces": [ip for _, ip, _ in lan_addrs()]}
+
+
+def cli(command):
+    """pause: an app connected. resume: the app paused, resume by hand.
+    start: the LuCI 开始广播 button. stop: the LuCI 停止广播 button.
+    status: the settings page.
+
+    The log lines go to stderr: stdout carries only the JSON that the caller parses.
+    """
+    if command == "pause":
+        if stop_on_connect():
+            set_paused(True)
+            print("dongle-announce: off (app connected)", file=sys.stderr, flush=True)
+    elif command == "resume":
+        set_paused(False)
+        print("dongle-announce: on (resumed by hand)", file=sys.stderr, flush=True)
+    elif command == "start":
+        set_stopped(False)
+        set_paused(False)
+        set_enabled("1")
+        print("dongle-announce: on (started by hand)", file=sys.stderr, flush=True)
+    elif command == "stop":
+        set_stopped(True)
+        set_enabled("0")
+        print("dongle-announce: off (stopped by hand)", file=sys.stderr, flush=True)
+    elif command != "status":
+        print(f"usage: dongle-announce [start|stop|pause|resume|status]", file=sys.stderr)
+        return 2
+    print(json.dumps(state()))
+    return 0
+
+
+def main():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    try:
+        sock.bind(("", PORT))
+    except OSError as e:
+        print(f"dongle-announce: cannot bind udp {PORT}: {e}", flush=True)
+        return 1
+    sock.setblocking(False)
+
+    name, api_port, dev_model = hostname(), http_port(), model()
+    master, stop = enabled(), stop_on_connect()
+    on = master and not stopped() and not (stop and paused())
+    addrs = lan_addrs()
+    next_config = next_info = time.time() + CONFIG_EVERY
+    next_announce = 0
+    print(f"dongle-announce: udp {PORT} {'on' if on else 'off'}, "
+          f"{len(addrs)} interface(s)", flush=True)
+
+    while True:
+        now = time.time()
+        if now >= next_config:
+            next_config = now + CONFIG_EVERY
+            master, stop = enabled(), stop_on_connect()
+            if master:
+                addrs = lan_addrs()
+        if now >= next_info:
+            next_info = now + INFO_EVERY
+            name, api_port, dev_model = hostname(), http_port(), model()
+
+        # The pause and stop flags are files, so they are read every second: the broadcast
+        # reacts right away instead of waiting up to CONFIG_EVERY for the next uci read.
+        active = master and not stopped() and not (stop and paused())
+        if active != on:
+            on = active
+            reason = "" if on else (" (app connected)" if master and stop else " (switch off)")
+            print(f"dongle-announce: {'on' if on else 'off'}{reason}", flush=True)
+
+        try:
+            ready = select.select([sock], [], [], TICK)[0]
+        except OSError:
+            ready = []
+        if ready:
+            answer(sock, addrs, name, api_port, dev_model, on)
+
+        if on and now >= next_announce:
+            next_announce = now + INTERVAL
+            for _, ip, prefix in addrs:
+                send(sock, broadcast(ip, prefix), PORT, payload(ip, name, api_port, dev_model))
+            if addrs:
+                # The limited broadcast reaches clients whose subnet mask is narrower than ours.
+                send(sock, "255.255.255.255", PORT, payload(addrs[0][1], name, api_port, dev_model))
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1]) if len(sys.argv) > 1 else main())

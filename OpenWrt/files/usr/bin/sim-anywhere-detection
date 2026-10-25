@@ -1,0 +1,128 @@
+#!/bin/sh
+# sim-anywhere-detection: sample the 4G dongle (USB 2ca3:4006, Quectel-based) once per run.
+# Run from cron, one line in /etc/crontabs/root; the LuCI status page checks that line and can
+# put it back (dongle-status repair) when it was edited away.
+# Independent of USB port (scans all devices) and SIM presence (records sim state).
+# Outputs: /tmp/dongle-web/status.json (latest), /root/dongle-history.csv (persistent history),
+#          SMS into /root/dongle-sms.tsv. Served by the JSON API /cgi-bin/sim-anywhere-api.
+VID=2ca3
+PID=4006
+WEB=/tmp/dongle-web          # volatile: latest status (rewritten every run)
+HIST=/root/dongle-history.csv
+MAXKEEP=20160      # ~14 days at one sample per minute
+TRIM_AT=30000      # trim only past this size to limit flash writes
+HEADER="ts,epoch,present,usb_port,at_port,sim,rssi,rsrp,rsrq,sinr,reg,temp,oper,band,usb0_carrier,usb0_ip,rx,tx,disconnects,netifd_up,rrc,cellid,pci,earfcn"
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+[ -f "$HIST" ] || echo "$HEADER" > "$HIST"
+[ "$(head -n 1 "$HIST")" = "$HEADER" ] || sed -i "1s/.*/$HEADER/" "$HIST"
+PAGE=/www/sim-anywhere      # static page + API docs; master copies in /root/dongle-web
+mkdir -p "$PAGE" "$WEB"
+for f in /root/dongle-web/*; do [ -f "$PAGE/${f##*/}" ] || cp "$f" "$PAGE/"; done
+
+. /usr/lib/dongle-at.sh
+# one run at a time; the SMS CGI shares this lock
+exec 9>"$AT_LOCK"
+flock -n 9 || exit 0
+
+NOW=$(date +%s)
+TS=$(date '+%Y-%m-%d %H:%M:%S')
+
+# 1. locate the dongle on any USB port
+USBDEV=""
+for d in /sys/bus/usb/devices/*; do
+  [ -f "$d/idVendor" ] || continue
+  if [ "$(cat "$d/idVendor" 2>/dev/null)" = "$VID" ] && [ "$(cat "$d/idProduct" 2>/dev/null)" = "$PID" ]; then
+    USBDEV=$d; break
+  fi
+done
+PRESENT=0; PORT=""; AT_PORT=""
+[ -n "$USBDEV" ] && { PRESENT=1; PORT=$(basename "$USBDEV"); }
+
+# 2. find the AT port (cached; rescanned when the cache stops answering)
+if [ -n "$USBDEV" ]; then
+  C=$(cat "$ATCACHE" 2>/dev/null)
+  if [ -n "$C" ] && [ -e "$C" ] && at_probe "$C"; then
+    AT_PORT=$C
+  else
+    for t in $(find -L "$USBDEV" -maxdepth 2 -name 'ttyUSB*' 2>/dev/null | sort -r); do
+      n=/dev/$(basename "$t")
+      if at_probe "$n"; then AT_PORT=$n; echo "$n" > "$ATCACHE"; break; fi
+    done
+  fi
+fi
+
+SIM=""; RSSI=""; RSRP=""; RSRQ=""; SINR=""; REG=""; TEMP=""; OPER=""; BAND=""
+RRC=""; CELLID=""; PCI=""; EARFCN=""; MODEL=""; APN=""; WIP=""; WIP6=""; DNS=""
+IMEI=""; ICCID=""; IMSI=""
+if [ -n "$AT_PORT" ]; then
+  MODEL=$(at_cmd ATI | grep -vE '^(OK|ERROR)$' | tr '\n' ' ' | sed 's/Revision: //; s/ *$//')
+  # identities: module IMEI, SIM ICCID and IMSI (empty when unreadable)
+  IMEI=$(at_cmd AT+CGSN | grep -E '^[0-9]{14,17}$')
+  ICCID=$(at_cmd AT+QCCID | sed -n 's/.*+QCCID: *\([0-9A-Fa-f]*\).*/\1/p')
+  IMSI=$(at_cmd AT+CIMI | grep -E '^[0-9]{6,15}$')
+  # SIM state
+  CPIN=$(at_cmd 'AT+CPIN?')
+  case "$CPIN" in
+    *READY*) SIM=ready ;;
+    *"SIM PIN"*|*"SIM PUK"*) SIM=locked ;;
+    *"CME ERROR: 10"*|*"CME ERROR: 13"*) SIM=no_sim ;;
+    *) SIM=unknown ;;
+  esac
+  # signal (RSSI dBm = -113 + 2*csq; 99 = unknown)
+  X=$(at_cmd 'AT+CSQ' | sed -n 's/.*+CSQ: *\([0-9]*\),.*/\1/p')
+  [ -n "$X" ] && [ "$X" != 99 ] && RSSI=$((-113 + 2 * X))
+  # LTE registration (1 home, 5 roaming)
+  REG=$(at_cmd 'AT+CEREG?' | sed -n 's/.*+CEREG: *[0-9]*, *\([0-9]*\).*/\1/p')
+  # serving cell: state,LTE,FDD,mcc,mnc,cellid,pci,earfcn,band,ulbw,dlbw,tac,rsrp,rsrq,rssi,sinr
+  Q=$(at_cmd 'AT+QENG="servingcell"' | grep '+QENG:' | head -1 | tr -d '"')
+  if [ -n "$Q" ] && [ "$(echo "$Q" | awk -F, '{print $3}')" = "LTE" ]; then
+    eval "$(echo "$Q" | awk -F, '{printf "RRC=%s CELLID=%s PCI=%s EARFCN=%s BAND=%s RSRP=%s RSRQ=%s SINR=%s",$2,$7,$8,$9,$10,$14,$15,$17}')"
+  fi
+  # module temperature (max of sensors)
+  TEMP=$(at_cmd 'AT+QTEMP' | sed -n 's/.*+QTEMP: *\(.*\)/\1/p' | tr ',' '\n' | sort -n | tail -1)
+  # operator name
+  OPER=$(at_cmd 'AT+COPS?' | sed -n 's/.*"\(.*\)".*/\1/p' | tr ' ,' '__')
+  # PDN context: APN, carrier-assigned addresses, DNS (IPv6 comes as 16 dotted bytes)
+  eval "$(at_cmd 'AT+CGCONTRDP=1' | awk -F'[, ]+' '/^\+CGCONTRDP:/ && !done {done=1; apn=$4
+    for (i = 5; i <= NF; i++) { n = split($i, p, ".")
+      if (n == 4) { if (ip == "") ip = $i; else dns = dns (dns == "" ? "" : " ") $i }
+      else if (n == 16 && p[1] != 254 && ip6 == "") { for (j = 1; j < 16; j += 2) ip6 = ip6 sprintf("%s%x", j > 1 ? ":" : "", p[j] * 256 + p[j+1]) } }
+    printf "APN=%s WIP=%s WIP6=%s DNS=\"%s\"", apn, ip, ip6, dns }')"
+  sms_sync
+  at_close
+fi
+
+# 3. network side
+U=$(uci -q get network.dongle.device 2>/dev/null); [ -n "$U" ] || U=usb0
+CARRIER=$(cat /sys/class/net/$U/carrier 2>/dev/null)
+UIP=$(ip -4 -o addr show "$U" 2>/dev/null | awk '{print $4}' | head -1)
+RX=$(awk -v d="$U:" '$1==d{print $2}' /proc/net/dev 2>/dev/null)
+TX=$(awk -v d="$U:" '$1==d{print $10}' /proc/net/dev 2>/dev/null)
+DISC=$(dmesg | grep -c 'USB disconnect')
+IFS_JSON=$(ifstatus dongle 2>/dev/null)
+NETIFD=$(echo "$IFS_JSON" | grep -c '"up": true')
+LINKUP=$(echo "$IFS_JSON" | sed -n 's/.*"uptime": *\([0-9]*\).*/\1/p' | head -1)
+LANDEV=$(uci -q get network.lan.device 2>/dev/null); [ -n "$LANDEV" ] || LANDEV=eth0
+HOSTIP=$(ip -4 -o addr show dev "$LANDEV" 2>/dev/null | awk 'NR==1{split($4,a,"/"); print a[1]}')
+
+ROW="$TS,$NOW,$PRESENT,$PORT,$AT_PORT,$SIM,$RSSI,$RSRP,$RSRQ,$SINR,$REG,$TEMP,$OPER,$BAND,$CARRIER,$UIP,$RX,$TX,$DISC,$NETIFD,$RRC,$CELLID,$PCI,$EARFCN"
+echo "$ROW" >> "$HIST"
+
+# 4. trim history rarely (keeps flash writes low)
+L=$(wc -l < "$HIST")
+[ "$L" -gt "$TRIM_AT" ] && { { head -n 1 "$HIST"; tail -n "$MAXKEEP" "$HIST"; } > "$HIST.tmp" && mv "$HIST.tmp" "$HIST"; }
+
+# 5. latest status as JSON (empty -> null)
+jn() { [ -n "$1" ] && echo "$1" || echo null; }
+js() { [ -n "$1" ] && echo "\"$1\"" || echo null; }
+cat > "$WEB/status.json.tmp" <<JSON
+{"ts":"$TS","epoch":$NOW,"present":$PRESENT,"usb_port":$(js "$PORT"),"at_port":$(js "$AT_PORT"),"model":$(js "$MODEL"),"imei":$(js "$IMEI"),"iccid":$(js "$ICCID"),"imsi":$(js "$IMSI"),
+"sim":$(js "$SIM"),"rssi":$(jn "$RSSI"),"rsrp":$(jn "$RSRP"),"rsrq":$(jn "$RSRQ"),"sinr":$(jn "$SINR"),
+"reg":$(jn "$REG"),"temp":$(jn "$TEMP"),"oper":$(js "$OPER"),"band":$(js "$BAND"),
+"rrc":$(js "$RRC"),"cellid":$(js "$CELLID"),"pci":$(js "$PCI"),"earfcn":$(js "$EARFCN"),
+"apn":$(js "$APN"),"wan_ip":$(js "$WIP"),"wan_ip6":$(js "$WIP6"),"dns":$(js "$DNS"),
+"usb0_dev":$(js "$U"),"usb0_carrier":$(jn "$CARRIER"),"usb0_ip":$(js "$UIP"),"rx":$(jn "$RX"),"tx":$(jn "$TX"),"link_uptime":$(jn "$LINKUP"),
+"disconnects":$DISC,"netifd_up":$NETIFD,"host_ip":$(js "$HOSTIP")}
+JSON
+mv "$WEB/status.json.tmp" "$WEB/status.json"

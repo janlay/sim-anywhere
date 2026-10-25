@@ -1,0 +1,8 @@
+#!/bin/sh
+# Create the data limit section of /etc/config/dongle on install. The LuCI settings page does
+# not show the options of a named section that does not exist yet.
+uci -q get dongle.quota >/dev/null || {
+	uci set dongle.quota=quota
+	uci commit dongle
+}
+exit 0

@@ -1,0 +1,821 @@
+#!/usr/bin/python3 -u
+# sim-anywhere-calld: voice calls through the 4G dongle (USB 2ca3:4006, UAC enabled).
+#   WebSocket ws://<host>:8765/call
+#     text   client -> {"op":"dial","number":"..."} | {"op":"answer"} | {"op":"hangup"} | {"op":"dtmf","digits":"..."}
+#     text   server -> {"type":"state",...} on connect and on each change | {"type":"error","error":"..."}
+#     binary both ways: PCM S16LE, 8000 Hz, mono (20 ms = 320 bytes); only for the client that dialed or answered
+#   Call control and URCs: modem interface 2 (the "usbat" URC port; sim-anywhere-detection uses interface 3).
+#   Audio: the modem UAC card through arecord / aplay.
+#   Wi-Fi Calling: when sim-anywhere-vowifid (UNIX socket, same ops and PCM) is registered, calls go through it.
+#     State adds "path" (wifi | modem) and "wifi" (registered | connecting | error | off).
+#     Modem incoming calls are ignored then: the IMS forks the call to both contacts, and a modem reject could end it.
+#   Call log: /root/dongle-calls.tsv (uid, in|out, epoch, number, answered 0|1, seconds), served by sim-anywhere-api GET /calls.
+#   sim-anywhere-api DELETE /calls rewrites the log under CALLS_LOCK; write_log takes the same lock.
+import array, base64, fcntl, glob, hashlib, json, os, re, selectors, socket, struct, subprocess, time, tty
+
+VID, PID = '2ca3', '4006'
+PORT = 8765
+LOG = '/root/dongle-calls.tsv'
+CALLS_LOCK = '/var/lock/dongle-calls.lock'
+MAXLOG = 1000
+NUMBER = re.compile(r'^\+?[0-9]{1,20}$')
+DTMF = re.compile(r'^[0-9*#A-D]{1,32}$')
+CLCC = re.compile(r'^\+CLCC: *(\d+),(\d),(\d),(\d),(\d)(?:,"([^"]*)")?')
+STATE = {0: 'active', 1: 'active', 2: 'dialing', 3: 'alerting', 4: 'incoming', 5: 'incoming'}
+URC = ('RING', '+CLIP:', '+CRING:', '+CMTI:', '+QIND:', '+CREG:', '+CGREG:', '+CEREG:', '+CUSD:', 'POWERED DOWN', 'RDY')
+ENDS = ('NO CARRIER', 'BUSY', 'NO ANSWER', 'NO DIALTONE')
+WS_GUID = b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+WIFI_SOCK = '/var/run/dongle-vowifid.sock'
+
+sel = selectors.DefaultSelector()
+
+
+def log(*a):
+    print(*a)
+
+
+def now():
+    return int(time.time())
+
+
+# ---------- modem AT port ----------
+class Modem:
+    def __init__(self):
+        self.fd = None
+        self.card = None
+        self.buf = b''
+        self.queue = []    # [cmd, callback, timeout]
+        self.cur = None    # {'cmd', 'cb', 'until', 'lines'}
+        self.retry = 0
+
+    def ready(self):
+        return self.fd is not None
+
+    def find(self):
+        for d in glob.glob('/sys/bus/usb/devices/*'):
+            try:
+                if open(d + '/idVendor').read().strip() != VID or open(d + '/idProduct').read().strip() != PID:
+                    continue
+            except OSError:
+                continue
+            t = glob.glob(d + ':1.2/ttyUSB*')
+            c = glob.glob(d + ':1.*/sound/card*/id')
+            if t:
+                return '/dev/' + os.path.basename(t[0]), (open(c[0]).read().strip() if c else None)
+        return None, None
+
+    def open(self):
+        if self.fd is not None or time.time() < self.retry:
+            return
+        self.retry = time.time() + 5
+        path, self.card = self.find()
+        if not path:
+            return
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            tty.setraw(fd)
+        except OSError as e:
+            log('open', path, e)
+            return
+        self.fd, self.buf, self.queue, self.cur = fd, b'', [], None
+        sel.register(fd, selectors.EVENT_READ, self.on_read)
+        log('modem', path, 'audio', self.card)
+        for c in ('ATE0', 'AT+CMEE=1', 'AT+CLIP=1', 'AT+COLP=0'):   # COLP=0: ATD returns OK at once
+            self.cmd(c)
+        call.poll()
+        call.notify()
+
+    def close(self):
+        if self.fd is None:
+            return
+        sel.unregister(self.fd)
+        os.close(self.fd)
+        self.fd = None
+        cur, queue = self.cur, self.queue
+        self.cur, self.queue = None, []
+        for c in ([cur['cb']] if cur else []) + [q[1] for q in queue]:
+            if c:
+                c([], 'ERROR')
+        log('modem gone')
+        call.lost()
+
+    def cmd(self, c, cb=None, timeout=5):
+        if self.fd is None:
+            if cb:
+                cb([], 'ERROR')
+            return
+        self.queue.append([c, cb, timeout])
+        self.next()
+
+    def next(self):
+        if self.cur or not self.queue or self.fd is None:
+            return
+        c, cb, t = self.queue.pop(0)
+        self.cur = {'cmd': c, 'cb': cb, 'until': time.time() + t, 'lines': []}
+        try:
+            os.write(self.fd, (c + '\r').encode())
+        except OSError:
+            self.close()
+
+    def done(self, result):
+        cur, self.cur = self.cur, None
+        if cur['cb']:
+            cur['cb'](cur['lines'], result)
+        self.next()
+
+    def tick(self):
+        if self.cur and time.time() > self.cur['until']:
+            self.done('TIMEOUT')
+
+    def on_read(self, fd, ev):
+        try:
+            data = os.read(fd, 4096)
+        except BlockingIOError:
+            return
+        except OSError:
+            data = b''
+        if not data:
+            return self.close()
+        self.buf += data
+        *lines, self.buf = self.buf.split(b'\n')
+        for raw in lines:
+            line = raw.decode('utf-8', 'replace').strip()
+            if line:
+                self.line(line)
+
+    def line(self, l):
+        c = self.cur
+        if c and l == c['cmd']:
+            return                                    # echo
+        if l.startswith(URC) or (l in ENDS and not (c and c['cmd'][:3] in ('ATD', 'ATA'))):
+            return call.urc(l)
+        if not c:
+            return
+        if l == 'OK' or l == 'ERROR' or l in ENDS or l.startswith('+CME ERROR'):
+            return self.done(l)
+        c['lines'].append(l)
+
+
+# ---------- Wi-Fi Calling (sim-anywhere-vowifid) ----------
+class Wifi:
+    """Frames on the socket: 1 byte type (0 JSON, 1 PCM), 2 bytes length (big-endian), payload."""
+
+    def __init__(self):
+        self.s = None
+        self.inb, self.out = b'', b''
+        self.state = None    # registered, connecting, error or off; None while not connected
+        self.retry = 0
+
+    def registered(self):
+        return self.s is not None and self.state == 'registered'
+
+    def open(self):
+        if self.s is not None or time.time() < self.retry:
+            return
+        self.retry = time.time() + 5
+        if not os.path.exists(WIFI_SOCK):
+            return
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.connect(WIFI_SOCK)
+        except OSError:
+            s.close()
+            return
+        s.setblocking(False)
+        self.s, self.inb, self.out = s, b'', b''
+        sel.register(s, selectors.EVENT_READ, self.on_io)
+        log('vowifid connected')
+
+    def close(self):
+        if self.s is None:
+            return
+        sel.unregister(self.s)
+        self.s.close()
+        self.s, self.state = None, None
+        log('vowifid gone')
+        call.wifi_lost()
+
+    def on_io(self, s, ev):
+        if ev & selectors.EVENT_WRITE:
+            self.flush()
+        if not ev & selectors.EVENT_READ or self.s is None:
+            return
+        try:
+            data = s.recv(65536)
+        except BlockingIOError:
+            return
+        except OSError:
+            data = b''
+        if not data:
+            return self.close()
+        self.inb += data
+        while len(self.inb) >= 3:
+            t, n = self.inb[0], struct.unpack('>H', self.inb[1:3])[0]
+            if len(self.inb) < 3 + n:
+                break
+            p, self.inb = self.inb[3:3 + n], self.inb[3 + n:]
+            if t == 1:
+                call.wifi_pcm(p)
+            elif t == 0:
+                try:
+                    m = json.loads(p)
+                except ValueError:
+                    continue
+                if isinstance(m, dict):
+                    call.wifi_event(m)
+
+    def send(self, t, p):
+        if self.s is None or (t == 1 and len(self.out) > 16384):   # drop audio rather than add latency
+            return
+        self.out += bytes([t]) + struct.pack('>H', len(p)) + p
+        self.flush()
+
+    def op(self, m):
+        log('vowifid op', json.dumps(m, ensure_ascii=False))
+        self.send(0, json.dumps(m).encode())
+
+    def flush(self):
+        if self.s is None:
+            return
+        try:
+            while self.out:
+                k = self.s.send(self.out)
+                self.out = self.out[k:]
+        except BlockingIOError:
+            pass
+        except OSError:
+            return self.close()
+        sel.modify(self.s, selectors.EVENT_READ | (selectors.EVENT_WRITE if self.out else 0), self.on_io)
+
+
+# ---------- call state ----------
+class Call:
+    def __init__(self):
+        self.reset()
+        self.next_poll = 0
+        self.reason = None
+        self.audio = None
+
+    def reset(self):
+        self.state, self.dir, self.number = 'idle', None, None
+        self.since = self.active_since = None
+        self.owner = None
+        self.grace = 0
+        self.wifi = False    # the current call is on Wi-Fi Calling
+        self.wifi_seen = False   # sim-anywhere-vowifid has reported the call
+        self.wifi_down = self.wifi_up = 0   # PCM frames relayed to and from the owner
+
+    def view(self, c):
+        return {'type': 'state', 'ready': modem.ready() or wifi.registered(), 'state': self.state, 'dir': self.dir,
+                'number': self.number, 'since': self.since, 'active_since': self.active_since,
+                'owner': c is not None and c is self.owner, 'reason': self.reason,
+                'path': 'wifi' if self.wifi or (self.state == 'idle' and wifi.registered()) else 'modem',
+                'wifi': wifi.state or 'off'}
+
+    def notify(self):
+        for c in list(clients):
+            c.text(self.view(c))
+
+    def poll(self):
+        self.next_poll = time.time() + (1 if self.state != 'idle' else 10)
+        modem.cmd('AT+CLCC', self.on_clcc)
+
+    def tick(self):
+        if modem.ready() and time.time() >= self.next_poll and not modem.cur and not modem.queue:
+            self.poll()
+
+    def urc(self, l):
+        if l.startswith(('RING', '+CRING', '+CLIP')):
+            m = re.match(r'^\+CLIP: *"([^"]*)"', l)
+            if m and self.state in ('idle', 'incoming') and m.group(1):
+                self.number = m.group(1)
+            self.poll()
+        elif l in ENDS:
+            self.reason = self.reason or l.lower()
+            self.poll()
+
+    def on_clcc(self, lines, res):
+        if res != 'OK':
+            return
+        voice = []
+        for l in lines:
+            m = CLCC.match(l)
+            if m and m.group(4) == '0':
+                voice.append((int(m.group(2)), int(m.group(3)), m.group(6) or ''))
+        voice.sort(key=lambda v: v[1] != 0)           # an active call first
+        self.update(voice[0] if voice else None)
+
+    def update(self, v):
+        if self.wifi or (v and v[0] == 1 and self.state == 'idle' and wifi.registered()):
+            return                                    # the call is on Wi-Fi, or Wi-Fi rings for the same incoming call
+        if v is None:
+            if self.state != 'idle' and time.time() > self.grace:
+                self.end()
+            return
+        d, stat, number = v
+        st, changed = STATE.get(stat, 'active'), False
+        if self.state == 'idle':
+            self.dir, self.since, self.reason = ('in' if d == 1 else 'out'), now(), None
+            self.number = number or self.number
+            changed = True
+        if number and number != self.number:
+            self.number, changed = number, True
+        if st != self.state:
+            log('state', self.dir, self.number, self.state, '->', st)
+            self.state, changed = st, True
+            if st == 'active' and self.active_since is None:
+                self.active_since = now()
+                if self.owner is None:
+                    modem.cmd('AT+CHUP')              # nobody to talk to
+            # audio from alerting on: ringback and network announcements come before the answer
+            if self.owner and st in ('alerting', 'active') and not self.audio:
+                self.start_audio()
+        if changed:
+            self.notify()
+
+    def end(self):
+        answered = self.active_since is not None
+        secs = now() - self.active_since if answered else 0
+        if self.since:
+            write_log(self.dir, self.since, self.number or '', answered, secs)
+        log('call end', 'wifi' if self.wifi else 'modem', self.dir, self.number,
+            'answered' if answered else 'not answered', secs, self.reason)
+        if not self.wifi:
+            modem.cmd('AT+CEER', lambda l, r: log('ceer', ' '.join(l), r))
+        else:
+            line = '%s calld %s down=%d up=%d owner=%s' % (time.strftime('%Y-%m-%d %H:%M:%S'), self.dir,
+                                                         self.wifi_down, self.wifi_up, self.owner is not None)
+            log(line)
+            try:
+                with open('/root/dongle-vowifi-calls.log', 'a') as f:
+                    f.write(line + '\n')
+            except OSError:
+                pass
+        self.stop_audio()
+        self.reset()
+        self.reason = self.reason or 'ended'
+        self.notify()
+
+    def lost(self):
+        if self.state != 'idle':
+            self.reason = 'modem gone'
+            self.end()
+        else:
+            self.notify()
+
+    # client operations
+    def op(self, c, m):
+        o = m.get('op')
+        log('op', c.addr[0], json.dumps(m, ensure_ascii=False))
+        n = re.sub(r'[ -]', '', str(m.get('number', '')))
+        if o == 'dial':
+            if not NUMBER.match(n):
+                return c.error('bad number')
+            if self.state != 'idle':
+                return c.error('line busy')
+        if self.wifi or (o == 'dial' and wifi.registered()):
+            return self.wifi_op(c, o, n, m)
+        if not modem.ready():
+            return c.error('modem not ready')
+        if o == 'dial':
+            self.state, self.dir, self.number, self.since, self.owner, self.reason = 'dialing', 'out', n, now(), c, None
+            self.grace = time.time() + 5
+            self.notify()
+            modem.cmd('AT+QPCMV=1,2', lambda l, r: log('qpcmv before dial', r))
+            modem.cmd('ATD%s;' % n, lambda l, r: self.dialed(c, r), 10)
+        elif o == 'answer':
+            if self.state != 'incoming':
+                return c.error('no incoming call')
+            self.owner = c
+            modem.cmd('AT+QPCMV=1,2', lambda l, r: log('qpcmv before answer', r))
+            modem.cmd('ATA', lambda l, r: r == 'OK' or self.failed(c, r), 30)
+            self.poll()
+        elif o == 'hangup':
+            if self.state == 'idle':
+                return c.error('no call')
+            self.reason = 'hangup'
+            modem.cmd('AT+CHUP', lambda l, r: r == 'OK' or modem.cmd('ATH'))
+            self.poll()
+        elif o == 'dtmf':
+            d = str(m.get('digits', ''))
+            if self.state != 'active' or c is not self.owner:
+                return c.error('no active call')
+            if not DTMF.match(d):
+                return c.error('bad digits')
+            for x in d:
+                modem.cmd('AT+VTS=%s' % x)
+        else:
+            c.error('unknown op')
+
+    def dialed(self, c, r):
+        log('dial', self.number, r)
+        if r in ('OK', 'TIMEOUT'):
+            return self.poll()
+        if self.state == 'dialing' and self.active_since is None:
+            log('dial failed', self.number, r)
+            self.reset()
+            self.reason = r.lower()
+            self.notify()
+            c.error('dial failed: ' + r)
+
+    def failed(self, c, r):
+        if self.owner is c:
+            self.owner = None
+        c.error('failed: ' + r)
+        self.poll()
+
+    def gone(self, c):
+        if c is self.owner and self.state != 'idle':
+            log('owner left, hanging up')
+            self.owner = None
+            if self.wifi:
+                return wifi.op({'op': 'hangup'})
+            self.stop_audio()
+            modem.cmd('AT+CHUP')
+            self.poll()
+
+    # Wi-Fi Calling: sim-anywhere-vowifid has the call; this daemon mirrors its state and relays ops and audio
+    def wifi_op(self, c, o, n, m):
+        if o == 'dial':
+            self.state, self.dir, self.number, self.since, self.owner, self.reason = 'dialing', 'out', n, now(), c, None
+            self.wifi = True
+            self.notify()
+            wifi.op({'op': 'dial', 'number': n})
+        elif o == 'answer':
+            if self.state != 'incoming':
+                return c.error('no incoming call')
+            self.owner = c
+            wifi.op({'op': 'answer'})
+        elif o == 'hangup':
+            self.reason = 'hangup'
+            wifi.op({'op': 'hangup'})
+        elif o == 'dtmf':
+            d = str(m.get('digits', ''))
+            if self.state != 'active' or c is not self.owner:
+                return c.error('no active call')
+            if not DTMF.match(d):
+                return c.error('bad digits')
+            wifi.op({'op': 'dtmf', 'digits': d})
+        else:
+            c.error('unknown op')
+
+    def wifi_event(self, m):
+        if m.get('type') == 'error':
+            log('vowifid error', m.get('error'))
+            if self.wifi and self.owner:
+                self.owner.error(m.get('error'))
+            if self.wifi and self.state == 'dialing':   # the dial was refused
+                self.reason = 'dial failed: %s' % m.get('error')
+                self.end()
+            return
+        if m.get('type') != 'state':
+            return
+        if m.get('wifi') != wifi.state:
+            log('wifi', wifi.state, '->', m.get('wifi'))
+            wifi.state = m.get('wifi')
+            if self.state == 'idle':
+                self.notify()                          # ready and path change
+        st = m.get('state') or 'idle'
+        if st == 'idle':
+            if self.wifi and self.wifi_seen:
+                self.reason = m.get('reason') or self.reason
+                self.end()
+            return
+        if not self.wifi:
+            if self.state != 'idle':                    # a modem call is in progress
+                return wifi.op({'op': 'hangup'})
+            self.wifi, self.since, self.reason = True, now(), None
+        self.wifi_seen = True
+        self.dir, self.number = m.get('dir') or self.dir, m.get('number') or self.number
+        if st != self.state:
+            log('state wifi', self.dir, self.number, self.state, '->', st)
+            self.state = st
+            if st == 'active' and self.active_since is None:
+                self.active_since = now()
+                if self.owner is None:
+                    wifi.op({'op': 'hangup'})          # nobody to talk to
+        self.notify()
+
+    def wifi_pcm(self, data):
+        if self.wifi and self.owner:
+            self.wifi_down += 1
+            self.owner.binary(data)
+
+    def wifi_lost(self):
+        if self.wifi:
+            self.reason = 'vowifid gone'
+            self.end()
+        else:
+            self.notify()
+
+    # audio: modem UAC <-> owner
+    def start_audio(self):
+        if not modem.card:
+            return self.owner.error('no audio device')
+        modem.cmd('AT+QPCMV=1,2', lambda l, r: log('qpcmv', r))   # route voice to UAC (some firmwares do it by default)
+        dev = ['-q', '-D', 'hw:CARD=%s,DEV=0' % modem.card, '-f', 'S16_LE', '-r', '8000', '-c', '1', '-t', 'raw',
+               '--period-size=160', '--buffer-size=1280']
+        rec = subprocess.Popen(['arecord'] + dev, stdout=subprocess.PIPE, stderr=open('/tmp/dongle-arecord.err', 'w'))
+        play = subprocess.Popen(['aplay'] + dev, stdin=subprocess.PIPE, stderr=open('/tmp/dongle-aplay.err', 'w'))
+        for f in (rec.stdout, play.stdin):
+            fcntl.fcntl(f, fcntl.F_SETFL, fcntl.fcntl(f, fcntl.F_GETFL) | os.O_NONBLOCK)
+        try:
+            fcntl.fcntl(play.stdin, fcntl.F_SETPIPE_SZ, 4096)   # keep uplink latency low; excess frames drop
+        except OSError:
+            pass
+        sel.register(rec.stdout, selectors.EVENT_READ, self.on_rec)
+        self.audio = (rec, play)
+        self.stats = {'down': 0, 'down_peak': 0, 'up': 0, 'up_peak': 0, 'up_drop': 0}
+        self.next_stats = time.time() + 5
+        log('audio on', modem.card)
+
+    @staticmethod
+    def peak(data):
+        a = array.array('h', data[:len(data) & ~1])
+        return max(map(abs, a), default=0)
+
+    def log_stats(self, why):
+        s = self.stats
+        log('audio', why, 'down %d B peak %d, up %d B peak %d, up dropped %d' %
+            (s['down'], s['down_peak'], s['up'], s['up_peak'], s['up_drop']))
+        for k in ('down_peak', 'up_peak'):
+            s[k] = 0
+        self.next_stats = time.time() + 5
+
+    def tick_audio(self):
+        if self.audio and time.time() >= self.next_stats:
+            for name, p in zip(('arecord', 'aplay'), self.audio):
+                if p.poll() is not None:
+                    log(name, 'exited', p.returncode, open('/tmp/dongle-%s.err' % name).read().strip()[:200])
+            self.log_stats('5s')
+
+    def stop_audio(self):
+        if not self.audio:
+            return
+        self.log_stats('end')
+        rec, play = self.audio
+        self.audio = None
+        sel.unregister(rec.stdout)
+        for p in (rec, play):
+            p.kill()
+            p.wait()
+        for f in (rec.stdout, play.stdin):
+            try:
+                f.close()
+            except OSError:
+                pass
+        modem.cmd('AT+QPCMV=0')
+        log('audio off')
+
+    def on_rec(self, f, ev):
+        try:
+            data = os.read(f.fileno(), 4096)
+        except BlockingIOError:
+            return
+        if not data:
+            self.stop_audio()
+            return
+        self.stats['down'] += len(data)
+        self.stats['down_peak'] = max(self.stats['down_peak'], self.peak(data))
+        if self.owner:
+            self.owner.binary(data)
+
+    def uplink(self, c, data):
+        if self.wifi:
+            if c is self.owner:
+                self.wifi_up += 1
+                wifi.send(1, data)
+            return
+        if self.audio and c is self.owner:
+            self.stats['up'] += len(data)
+            self.stats['up_peak'] = max(self.stats['up_peak'], self.peak(data))
+            try:
+                os.write(self.audio[1].stdin.fileno(), data)
+            except (BlockingIOError, BrokenPipeError):
+                self.stats['up_drop'] += 1
+
+
+def write_log(d, epoch, number, answered, secs):
+    uid = hashlib.md5(('%s %s %s' % (epoch, d, number)).encode()).hexdigest()[:12]
+    with open(CALLS_LOCK, 'w') as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        with open(LOG, 'a') as f:
+            f.write('%s\t%s\t%d\t%s\t%d\t%d\n' % (uid, d, epoch, number, 1 if answered else 0, secs))
+        with open(LOG) as f:
+            rows = f.readlines()
+        if len(rows) > MAXLOG * 1.2:
+            with open(LOG + '.tmp', 'w') as f:
+                f.writelines(rows[-MAXLOG:])
+            os.rename(LOG + '.tmp', LOG)
+
+
+# ---------- WebSocket ----------
+clients = set()
+
+
+class Client:
+    def __init__(self, s, addr):
+        self.s, self.addr = s, addr
+        self.inb, self.out = b'', b''
+        self.up = False
+        self.frag = None
+        self.seen = time.time()
+        s.setblocking(False)
+        sel.register(s, selectors.EVENT_READ, self.on_io)
+
+    def on_io(self, s, ev):
+        if ev & selectors.EVENT_WRITE:
+            self.flush()
+        if not ev & selectors.EVENT_READ:
+            return
+        try:
+            data = s.recv(65536)
+        except BlockingIOError:
+            return
+        except OSError:
+            data = b''
+        if not data:
+            return self.close()
+        self.seen = time.time()
+        self.inb += data
+        if not self.up:
+            self.handshake()
+        while self.up and self.frame():
+            pass
+
+    def handshake(self):
+        if b'\r\n\r\n' not in self.inb:
+            if len(self.inb) > 8192:
+                self.close()
+            return
+        head, self.inb = self.inb.split(b'\r\n\r\n', 1)
+        lines = head.decode('latin-1').split('\r\n')
+        h = {}
+        for l in lines[1:]:
+            k, _, v = l.partition(':')
+            h[k.strip().lower()] = v.strip()
+        req = lines[0].split()
+        key = h.get('sec-websocket-key')
+        origin = h.get('origin')
+        host = h.get('host', '').split(':')[0]
+        if len(req) < 2 or req[0] != 'GET' or req[1].split('?')[0] != '/call':
+            return self.reject('404 Not Found')
+        if 'websocket' not in h.get('upgrade', '').lower() or not key:
+            return self.reject('400 Bad Request')
+        # browsers always send Origin; only the node's own pages may connect (blocks cross-site WebSocket use)
+        if origin and re.sub(r'^https?://', '', origin).split(':')[0].split('/')[0] != host:
+            return self.reject('403 Forbidden')
+        acc = base64.b64encode(hashlib.sha1(key.encode() + WS_GUID).digest()).decode()
+        self.raw(('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+                  'Sec-WebSocket-Accept: %s\r\n\r\n' % acc).encode())
+        self.up = True
+        clients.add(self)
+        log('client', self.addr[0])
+        self.text(call.view(self))
+
+    def reject(self, status):
+        self.raw(('HTTP/1.1 %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n' % status).encode())
+        self.flush()
+        self.close()
+
+    def frame(self):
+        b = self.inb
+        if len(b) < 2:
+            return False
+        fin, op, masked, n, i = b[0] & 0x80, b[0] & 0x0F, b[1] & 0x80, b[1] & 0x7F, 2
+        if n == 126:
+            if len(b) < 4:
+                return False
+            n, i = struct.unpack('>H', b[2:4])[0], 4
+        elif n == 127:
+            if len(b) < 10:
+                return False
+            n, i = struct.unpack('>Q', b[2:10])[0], 10
+        if not masked or n > 1 << 20:
+            self.close()
+            return False
+        if len(b) < i + 4 + n:
+            return False
+        mask, data = b[i:i + 4], b[i + 4:i + 4 + n]
+        self.inb = b[i + 4 + n:]
+        if n:
+            k = int.from_bytes((mask * (n // 4 + 1))[:n], 'little')
+            data = (int.from_bytes(data, 'little') ^ k).to_bytes(n, 'little')
+        if op == 0 and self.frag:
+            self.frag[1] += data
+            if fin:
+                self.message(*self.frag)
+                self.frag = None
+        elif op in (1, 2):
+            if fin:
+                self.message(op, data)
+            else:
+                self.frag = [op, data]
+        elif op == 8:
+            self.send(8, data[:2])
+            self.flush()
+            self.close()
+            return False
+        elif op == 9:
+            self.send(10, data)
+        return True
+
+    def message(self, op, data):
+        if op == 2:
+            return call.uplink(self, data)
+        try:
+            m = json.loads(data)
+        except ValueError:
+            return self.error('bad json')
+        if not isinstance(m, dict):
+            return self.error('bad json')
+        call.op(self, m)
+
+    def raw(self, data):
+        self.out += data
+        self.flush()
+
+    def send(self, op, data):
+        n = len(data)
+        h = bytes([0x80 | op]) + (bytes([n]) if n < 126 else
+                                  b'\x7e' + struct.pack('>H', n) if n < 65536 else b'\x7f' + struct.pack('>Q', n))
+        self.raw(h + data)
+
+    def text(self, obj):
+        self.send(1, json.dumps(obj, ensure_ascii=False).encode())
+
+    def binary(self, data):
+        if len(self.out) < 16384:                     # a slow client loses audio, not latency
+            self.send(2, data)
+
+    def error(self, msg):
+        log('error', self.addr[0], msg)
+        self.text({'type': 'error', 'error': msg})
+
+    def flush(self):
+        if self.s is None:
+            return
+        try:
+            while self.out:
+                k = self.s.send(self.out)
+                self.out = self.out[k:]
+        except BlockingIOError:
+            pass
+        except OSError:
+            return self.close()
+        sel.modify(self.s, selectors.EVENT_READ | (selectors.EVENT_WRITE if self.out else 0), self.on_io)
+
+    def close(self):
+        if self.s is None:
+            return
+        sel.unregister(self.s)
+        self.s.close()
+        self.s = None
+        if self in clients:
+            clients.discard(self)
+            log('client left', self.addr[0])
+            call.gone(self)
+
+
+def on_accept(srv, ev):
+    try:
+        s, addr = srv.accept()
+    except OSError:
+        return
+    Client(s, addr)
+
+
+modem = Modem()
+wifi = Wifi()
+call = Call()
+
+
+def main():
+    srv = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+    srv.bind(('::', PORT))
+    srv.listen(8)
+    srv.setblocking(False)
+    sel.register(srv, selectors.EVENT_READ, on_accept)
+    log('listening on', PORT)
+    ping = 0
+    while True:
+        for key, ev in sel.select(0.25):
+            key.data(key.fileobj, ev)
+        modem.open()
+        wifi.open()
+        modem.tick()
+        call.tick()
+        call.tick_audio()
+        t = time.time()
+        if t >= ping:
+            ping = t + 20
+            for c in list(clients):
+                if t - c.seen > 60:
+                    c.close()
+                else:
+                    c.send(9, b'')
+
+
+main()

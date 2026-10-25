@@ -1,0 +1,69 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "连接 SIM Anywhere 节点",
+        "description": "输入运行 SIM Anywhere API 的节点地址。",
+        "data": {
+          "host": "地址"
+        },
+        "data_description": {
+          "host": "例如 openwrt.local。"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接节点。",
+      "unknown": "节点返回了无法识别的数据。"
+    },
+    "abort": {
+      "already_configured": "该节点已配置。"
+    }
+  },
+  "device": {
+    "dongle": {
+      "name": "4G Dongle"
+    },
+    "sim": {
+      "name": "SIM 卡"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "dongle": {
+        "state": {
+          "online": "在线",
+          "absent": "未检测到",
+          "link_down": "链路中断",
+          "no_modem_data": "无模组数据"
+        }
+      },
+      "sim": {
+        "state": {
+          "ready": "就绪",
+          "no_sim": "未插卡",
+          "locked": "已锁定",
+          "unknown": "未知"
+        }
+      },
+      "rx": {
+        "name": "下载总量"
+      },
+      "tx": {
+        "name": "上传总量"
+      },
+      "rsrp": {
+        "name": "RSRP"
+      },
+      "rsrq": {
+        "name": "RSRQ"
+      },
+      "sinr": {
+        "name": "SINR"
+      },
+      "rssi": {
+        "name": "RSSI"
+      }
+    }
+  }
+}

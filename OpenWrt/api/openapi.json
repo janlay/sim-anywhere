@@ -1,0 +1,1853 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "SIM Anywhere API",
+  "version": "1.0.0",
+  "description": "Status, history, SMS and voice calls of the USB 4G dongle (Quectel-based, USB 2ca3:4006) on an OpenWrt node.\n\nThe API runs on each OpenWrt node where the monitor is installed. Each node reports its own dongle and keeps its own SMS archive.\n\n**Write requests** (`POST`, `PATCH`, `DELETE`) must send `Content-Type: application/json`. Browsers cannot send this from another site without a CORS preflight, and the API does not answer preflights, so only same-origin pages and non-browser clients can write.\n\nErrors return a JSON body `{\"error\": \"...\"}` with a 4xx/5xx status.\n\n**Voice calls** use a WebSocket on the same node: `ws://<host>:8765/call` (service `sim-anywhere-calld`, not this CGI). Text frames carry JSON. The client sends `{\"op\": \"dial\", \"number\": \"...\"}`, `{\"op\": \"answer\"}`, `{\"op\": \"hangup\"}` or `{\"op\": \"dtmf\", \"digits\": \"...\"}`. The server sends `{\"type\": \"state\", ...}` (schema `CallState`) on connect and on each change, and `{\"type\": \"error\", \"error\": \"...\"}` when an op fails. Binary frames carry the audio in both directions: PCM S16LE, 8000 Hz, mono, 20 ms (320 bytes) per frame. Only the client that dialed or answered (`owner: true`) sends and receives audio. When Wi-Fi Calling is registered (`wifi: \"registered\"`), calls use it (`path: \"wifi\"`); the ops and the audio frames are the same on both paths, and modem incoming calls are not reported. When that client disconnects, the call ends. A request whose `Origin` host differs from its `Host` is refused, so other sites cannot use the WebSocket from a browser.\n\n**Device gate**: without the dongle (USB `2ca3:4006`) the node has nothing to serve. Every endpoint except `GET /` and `GET /status` then answers `503` with `{\"error\": \"dongle not present\", \"present\": 0}`. `/status` keeps streaming with `present: 0`, so a client can tell \"node up, no dongle\" from \"node unreachable\". A node without the dongle also stops `uhttpd` at boot, in which case there is no HTTP answer at all and the node is reachable only over ssh."
+ },
+ "servers": [
+  {
+   "url": "/cgi-bin/sim-anywhere-api",
+   "description": "Current node"
+  }
+ ],
+ "tags": [
+  {
+   "name": "Monitor",
+   "description": "Latest sample and history. The collector samples once per minute."
+  },
+  {
+   "name": "SMS",
+   "description": "SMS archive. The collector moves new SMS from the modem into the archive every minute."
+  },
+  {
+   "name": "Modem",
+   "description": "Raw AT commands. A command can change the modem configuration or restart it."
+  },
+  {
+   "name": "Calls",
+   "description": "Call log, written by `sim-anywhere-calld`. Calls themselves use the WebSocket (see the description above)."
+  },
+  {
+   "name": "Quota",
+   "description": "Data plan: cycle and daily usage, limits and the block state of the 4G data link"
+  },
+  {
+   "name": "Proxy",
+   "description": "Clash/Mihomo proxy groups that can exit through the 4G dongle proxy"
+  },
+  {
+   "name": "Discovery",
+   "description": "LAN discovery. The node announces its name and address over UDP 8766 (`dongle-announce`); an app that has connected reports itself here."
+  }
+ ],
+ "paths": {
+  "/": {
+   "get": {
+    "tags": [
+     "Monitor"
+    ],
+    "summary": "API index",
+    "operationId": "getIndex",
+    "responses": {
+     "200": {
+      "description": "Endpoints and the location of this spec",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "spec": {
+           "type": "string",
+           "example": "/sim-anywhere/openapi.json"
+          },
+          "endpoints": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           },
+           "example": [
+            "status",
+            "history",
+            "sms",
+            "sms/sync",
+            "calls",
+            "at",
+            "proxy/status",
+            "proxy/groups",
+            "proxy/select",
+            "proxy/ping",
+            "proxy/test"
+           ]
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/status": {
+   "get": {
+    "tags": [
+     "Monitor"
+    ],
+    "summary": "Status stream",
+    "description": "NDJSON stream, one record per second: epoch, rx, tx (usb0 bytes since boot), usb0_carrier. A record with sample_epoch (about once a minute) also carries the AT-based fields of the latest collector sample. The stream ends after `seconds` (default 3600); clients reconnect.",
+    "operationId": "getStatus",
+    "parameters": [
+     {
+      "name": "seconds",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 3600,
+       "default": 3600
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Status records, one JSON object per line",
+      "content": {
+       "application/x-ndjson": {
+        "schema": {
+         "$ref": "#/components/schemas/Status"
+        }
+       }
+      }
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/history": {
+   "get": {
+    "tags": [
+     "Monitor"
+    ],
+    "summary": "Samples in a time range (columnar)",
+    "operationId": "getHistory",
+    "description": "Returns samples newer than `since`, or from the last `window` seconds. History keeps about 14 days. Use `since` with the last `epoch` you have to poll only new rows.",
+    "parameters": [
+     {
+      "name": "window",
+      "in": "query",
+      "description": "Seconds back from now. Default 86400. Ignored when `since` is set.",
+      "schema": {
+       "type": "integer",
+       "minimum": 60,
+       "example": 3600
+      }
+     },
+     {
+      "name": "since",
+      "in": "query",
+      "description": "Return rows with `epoch` greater than this Unix time.",
+      "schema": {
+       "type": "integer",
+       "example": 1792200000
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Rows in time order",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/History"
+        }
+       }
+      }
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/sms": {
+   "get": {
+    "tags": [
+     "SMS"
+    ],
+    "summary": "List messages",
+    "operationId": "listSms",
+    "description": "Newest first. Parts of a long SMS are merged into one message; its `id` joins the part ids with `-`.",
+    "parameters": [
+     {
+      "name": "box",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "in",
+        "out"
+       ]
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Messages",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "unread",
+          "messages"
+         ],
+         "properties": {
+          "unread": {
+           "type": "integer",
+           "description": "Unread messages in the inbox (in the filtered list)"
+          },
+          "messages": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Message"
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "post": {
+    "tags": [
+     "SMS"
+    ],
+    "summary": "Send a message",
+    "operationId": "sendSms",
+    "description": "Encodes the text (GSM 7-bit, or UCS2 when needed), splits it into at most 10 parts and sends them. The carrier can charge for each part. With `dry_run` it only returns the encoding and part count.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SendRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Dry run result",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SendResult"
+        }
+       }
+      }
+     },
+     "201": {
+      "description": "Sent and archived",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SendResult"
+        }
+       }
+      }
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "415": {
+      "$ref": "#/components/responses/Error"
+     },
+     "502": {
+      "description": "The modem rejected a part. Parts before it were sent.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "error": {
+           "type": "string"
+          },
+          "sent": {
+           "type": "integer"
+          },
+          "parts": {
+           "type": "integer"
+          }
+         }
+        }
+       }
+      }
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "patch": {
+    "tags": [
+     "SMS"
+    ],
+    "summary": "Mark messages read or unread",
+    "operationId": "updateSmsBulk",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "ids",
+         "read"
+        ],
+        "properties": {
+         "ids": {
+          "type": "array",
+          "items": {
+           "$ref": "#/components/schemas/MessageId"
+          }
+         },
+         "read": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Updated"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "tags": [
+     "SMS"
+    ],
+    "summary": "Delete messages",
+    "operationId": "deleteSmsBulk",
+    "description": "Removes the messages from the archive. This cannot be undone.",
+    "parameters": [
+     {
+      "name": "ids",
+      "in": "query",
+      "required": true,
+      "description": "Comma-separated message ids",
+      "schema": {
+       "type": "string"
+      },
+      "example": "080fd93e54b1,9b517ba134f4-54f77dcca43d"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Deleted"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/sms/{id}": {
+   "parameters": [
+    {
+     "name": "id",
+     "in": "path",
+     "required": true,
+     "schema": {
+      "$ref": "#/components/schemas/MessageId"
+     }
+    }
+   ],
+   "patch": {
+    "tags": [
+     "SMS"
+    ],
+    "summary": "Mark one message read or unread",
+    "operationId": "updateSms",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "read"
+        ],
+        "properties": {
+         "read": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Updated"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "tags": [
+     "SMS"
+    ],
+    "summary": "Delete one message",
+    "operationId": "deleteSms",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Deleted"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/sms/sync": {
+   "post": {
+    "tags": [
+     "SMS"
+    ],
+    "summary": "Pull new SMS from the modem now",
+    "operationId": "syncSms",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       },
+       "example": {}
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Done",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "synced": {
+           "type": "boolean"
+          }
+         }
+        }
+       }
+      }
+     },
+     "503": {
+      "description": "No dongle or AT port on this node, or the port stayed busy",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/at": {
+   "post": {
+    "tags": [
+     "Modem"
+    ],
+    "summary": "Send one AT command",
+    "operationId": "sendAt",
+    "description": "Sends the command on the modem AT port (under the AT lock) and returns the response lines. The modem echo and the final result line are not in `lines`. `result` is `TIMEOUT` when no final result came within `timeout` seconds of the last line.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "command"
+        ],
+        "properties": {
+         "command": {
+          "type": "string",
+          "pattern": "^[Aa][Tt][ -~]{0,254}$",
+          "example": "AT+QENG=\"servingcell\""
+         },
+         "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 180,
+          "default": 5,
+          "description": "Seconds to wait for each response line"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Response",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "command",
+          "lines",
+          "result"
+         ],
+         "properties": {
+          "command": {
+           "type": "string"
+          },
+          "lines": {
+           "type": "array",
+           "items": {
+            "type": "string"
+           }
+          },
+          "result": {
+           "type": "string",
+           "description": "OK, ERROR, +CME ERROR: ..., +CMS ERROR: ... or TIMEOUT",
+           "example": "OK"
+          }
+         }
+        }
+       }
+      }
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/discovery/hello": {
+   "post": {
+    "tags": [
+     "Discovery"
+    ],
+    "summary": "An app connected",
+    "operationId": "discoveryHello",
+    "description": "Reports that an app connected to this node. With UCI `dongle.discovery.stop_on_connect` on, the node stops its LAN broadcast (`dongle-announce`) until the switch on the LuCI settings page starts it again, or until the node reboots. The body is ignored; send `{}`. A node from an older build answers 404, which the client may ignore.",
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "The discovery state after this connection",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "paused": {
+           "type": "boolean",
+           "description": "True when the broadcast is now paused because of this connection"
+          },
+          "stop_on_connect": {
+           "type": "boolean"
+          }
+         }
+        }
+       }
+      }
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/calls": {
+   "get": {
+    "tags": [
+     "Calls"
+    ],
+    "summary": "Call log, newest first",
+    "operationId": "listCalls",
+    "responses": {
+     "200": {
+      "description": "Calls",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "calls": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Call"
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "tags": [
+     "Calls"
+    ],
+    "summary": "Delete call log entries",
+    "operationId": "deleteCalls",
+    "description": "Removes the entries from the call log. This cannot be undone.",
+    "parameters": [
+     {
+      "name": "ids",
+      "in": "query",
+      "required": true,
+      "description": "Comma-separated call ids",
+      "schema": {
+       "type": "string"
+      },
+      "example": "9b517ba134f4"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Deleted"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/proxy/status": {
+   "get": {
+    "tags": [
+     "Proxy"
+    ],
+    "summary": "Clash/Mihomo integration status",
+    "operationId": "getProxyStatus",
+    "description": "Detection result for the integrated Mihomo/Clash: whether a core was found, its process PID/GID, core name and version, and the auto-detected 4G exit proxy. Returns 200 with integrated:false when no core is found.",
+    "responses": {
+     "200": {
+      "description": "Integration status",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ProxyStatus"
+        }
+       }
+      }
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/proxy/groups": {
+   "get": {
+    "tags": [
+     "Proxy"
+    ],
+    "summary": "List proxy groups using the 4G exit proxy",
+    "operationId": "getProxyGroups",
+    "description": "The 4G exit proxy is auto-detected: the first proxy in the integrated Mihomo/Clash config whose interface is the dongle interface. Returns every adjustable proxy group (selector/url-test/fallback) that contains the exit proxy, with each member proxy, its latest test delay and whether it is selected. 503 when Clash is not integrated or no exit proxy exists on this node.",
+    "responses": {
+     "200": {
+      "description": "Proxy groups",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ProxyGroups"
+        }
+       }
+      }
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/proxy/select": {
+   "post": {
+    "tags": [
+     "Proxy"
+    ],
+    "summary": "Switch a proxy group to a member proxy",
+    "operationId": "selectProxy",
+    "description": "Sets the group selection on the integrated Mihomo/Clash (PUT /proxies/{group}) and reloads its config (force), so the choice survives core restarts. Works on selector, url-test and fallback groups. The proxy must be a member of the group.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ProxySelectRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Selection applied",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "ok"
+         ],
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          }
+         }
+        }
+       }
+      }
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/proxy/ping": {
+   "post": {
+    "tags": [
+     "Proxy"
+    ],
+    "summary": "Delay-test the 4G exit proxy (or a given proxy)",
+    "operationId": "pingProxy",
+    "description": "Runs a URL test through the integrated Mihomo/Clash for the exit proxy (default) or the proxy named in the optional body. The measured delay updates the core history, so a following GET /proxy/groups reports it. 502 with the core message when the test fails (e.g. timeout).",
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "proxy": {
+          "type": "string",
+          "description": "Proxy to test; defaults to the 4G exit proxy"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Delay in milliseconds",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "name",
+          "delay"
+         ],
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "delay": {
+           "type": "integer",
+           "example": 119
+          }
+         }
+        }
+       }
+      }
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/proxy/test": {
+   "post": {
+    "tags": [
+     "Proxy"
+    ],
+    "summary": "Delay-test every member of the listed proxy groups, or of one group",
+    "operationId": "testProxyGroups",
+    "description": "Runs a URL test for all members of all groups returned by GET /proxy/groups through the integrated Mihomo/Clash. With the optional `group`, only that group is tested. Measured delays update the core history; re-fetch the groups to display them. Groups that fail to test are counted in failed_groups.",
+    "requestBody": {
+     "required": false,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "group": {
+          "type": "string",
+          "description": "Only test this group; defaults to every group on the proxy page",
+          "example": "Google"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Test finished",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "ok"
+         ],
+         "properties": {
+          "ok": {
+           "type": "boolean"
+          },
+          "groups": {
+           "type": "integer",
+           "description": "Number of groups tested"
+          },
+          "tested": {
+           "type": "integer",
+           "description": "Members with a measured delay"
+          },
+          "failed_groups": {
+           "type": "integer"
+          }
+         }
+        }
+       }
+      }
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/quota": {
+   "get": {
+    "tags": [
+     "Quota"
+    ],
+    "summary": "Data plan usage and limits",
+    "operationId": "getQuota",
+    "description": "Cycle and today's usage in bytes, the configured limits (0 = no limit), the percentage of the cycle plan at which it blocks (`ratio`), whether each limit is switched on (`cycle_on`, `daily_on`), the block state, and the next cycle start date (`next_reset`, for the cycle kinds natural month, day of month and fixed days). A limit blocks only when its switch is on. The usage is counted every second from the uplink (usb0) counters by the sim-anywhere-quota service; a block sends AT+CGATT=0. 503 when no dongle is present.",
+    "responses": {
+     "200": {
+      "description": "Data plan state",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Quota"
+        }
+       }
+      }
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "schemas": {
+   "Error": {
+    "type": "object",
+    "required": [
+     "error"
+    ],
+    "properties": {
+     "error": {
+      "type": "string"
+     }
+    }
+   },
+   "MessageId": {
+    "type": "string",
+    "pattern": "^[0-9a-f]{12}(-[0-9a-f]{12})*$",
+    "example": "9b517ba134f4-54f77dcca43d"
+   },
+   "Message": {
+    "type": "object",
+    "required": [
+     "id",
+     "box",
+     "number",
+     "time",
+     "epoch",
+     "read",
+     "text",
+     "parts",
+     "total"
+    ],
+    "properties": {
+     "id": {
+      "$ref": "#/components/schemas/MessageId"
+     },
+     "box": {
+      "type": "string",
+      "enum": [
+       "in",
+       "out"
+      ]
+     },
+     "number": {
+      "type": "string",
+      "description": "Sender (in) or recipient (out); can be alphanumeric, e.g. `Maxx`"
+     },
+     "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Service centre time (in) or archive time (out), UTC"
+     },
+     "epoch": {
+      "type": "integer"
+     },
+     "read": {
+      "type": "boolean"
+     },
+     "text": {
+      "type": "string"
+     },
+     "parts": {
+      "type": "integer",
+      "description": "Parts present in the archive"
+     },
+     "total": {
+      "type": "integer",
+      "description": "Parts of the long SMS; `parts < total` means parts are missing"
+     }
+    }
+   },
+   "SendRequest": {
+    "type": "object",
+    "required": [
+     "to",
+     "text"
+    ],
+    "properties": {
+     "to": {
+      "type": "string",
+      "pattern": "^\\+?[0-9][0-9 -]{1,19}$",
+      "example": "+12025550147"
+     },
+     "text": {
+      "type": "string",
+      "minLength": 1
+     },
+     "dry_run": {
+      "type": "boolean",
+      "default": false
+     }
+    }
+   },
+   "SendResult": {
+    "type": "object",
+    "required": [
+     "encoding",
+     "parts"
+    ],
+    "properties": {
+     "id": {
+      "$ref": "#/components/schemas/MessageId"
+     },
+     "encoding": {
+      "type": "string",
+      "enum": [
+       "gsm7",
+       "ucs2"
+      ]
+     },
+     "parts": {
+      "type": "integer"
+     }
+    }
+   },
+   "Status": {
+    "type": "object",
+    "description": "AT fields are null when the dongle or its AT port is missing.",
+    "properties": {
+     "ts": {
+      "type": "string",
+      "description": "Local time `YYYY-MM-DD HH:MM:SS`"
+     },
+     "epoch": {
+      "type": "integer"
+     },
+     "present": {
+      "type": "integer",
+      "enum": [
+       0,
+       1
+      ],
+      "description": "Dongle found on USB"
+     },
+     "usb_port": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "at_port": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "model": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "imei": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "Module IMEI (AT+CGSN)"
+     },
+     "iccid": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "SIM ICCID (AT+QCCID)"
+     },
+     "imsi": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "SIM IMSI (AT+CIMI)"
+     },
+     "sim": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "enum": [
+       "ready",
+       "no_sim",
+       "locked",
+       "unknown",
+       null
+      ]
+     },
+     "rssi": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "description": "dBm"
+     },
+     "rsrp": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "description": "dBm"
+     },
+     "rsrq": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "description": "dB"
+     },
+     "sinr": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "description": "dB"
+     },
+     "reg": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "description": "CEREG stat: 1 home, 5 roaming"
+     },
+     "temp": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "description": "Module temperature, °C"
+     },
+     "oper": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "Operator, spaces as `_`"
+     },
+     "band": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "LTE band number"
+     },
+     "rrc": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "enum": [
+       "NOCONN",
+       "CONNECT",
+       "SEARCH",
+       "LIMSRV",
+       null
+      ]
+     },
+     "cellid": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "pci": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "earfcn": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "apn": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "wan_ip": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "Carrier-assigned IPv4"
+     },
+     "wan_ip6": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "Carrier-assigned IPv6"
+     },
+     "dns": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "Carrier DNS, space-separated"
+     },
+     "usb0_carrier": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "enum": [
+       0,
+       1,
+       null
+      ]
+     },
+     "usb0_ip": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "Node address on the dongle LAN, CIDR"
+     },
+     "rx": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "description": "usb0 received bytes since boot. Read at request time from /proc/net/dev."
+     },
+     "tx": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "description": "usb0 transmitted bytes since boot. Read at request time from /proc/net/dev."
+     },
+     "link_uptime": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "description": "Seconds the netifd interface `dongle` has been up"
+     },
+     "disconnects": {
+      "type": "integer",
+      "description": "`USB disconnect` lines in dmesg since boot"
+     },
+     "netifd_up": {
+      "type": "integer",
+      "enum": [
+       0,
+       1
+      ]
+     },
+     "host_ip": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "Node LAN address"
+     },
+     "usb0_dev": {
+      "type": "string",
+      "description": "Network device of the dongle (usb0 by default)."
+     },
+     "live_epoch": {
+      "type": "integer",
+      "description": "Time of this request (epoch seconds). rx, tx and usb0_carrier are current as of this time. epoch is the time of the last collector run (about once a minute)."
+     }
+    }
+   },
+   "Call": {
+    "type": "object",
+    "required": [
+     "id",
+     "dir",
+     "number",
+     "time",
+     "epoch",
+     "answered",
+     "duration"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{12}$"
+     },
+     "dir": {
+      "type": "string",
+      "enum": [
+       "in",
+       "out"
+      ]
+     },
+     "number": {
+      "type": "string",
+      "description": "Empty when the caller ID is hidden"
+     },
+     "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Start of ringing or dialing"
+     },
+     "epoch": {
+      "type": "integer"
+     },
+     "answered": {
+      "type": "boolean",
+      "description": "false for a missed incoming call or an unanswered outgoing call"
+     },
+     "duration": {
+      "type": "integer",
+      "description": "Seconds from answer to end; 0 when not answered"
+     }
+    }
+   },
+   "CallState": {
+    "type": "object",
+    "description": "WebSocket text frame from the server",
+    "properties": {
+     "type": {
+      "const": "state"
+     },
+     "ready": {
+      "type": "boolean",
+      "description": "One path can place a call: the modem AT port is open, or Wi-Fi Calling is registered"
+     },
+     "state": {
+      "type": "string",
+      "enum": [
+       "idle",
+       "dialing",
+       "alerting",
+       "incoming",
+       "active"
+      ]
+     },
+     "dir": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "enum": [
+       "in",
+       "out",
+       null
+      ]
+     },
+     "number": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "since": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "description": "Epoch of ringing or dialing"
+     },
+     "active_since": {
+      "type": [
+       "integer",
+       "null"
+      ],
+      "description": "Epoch of answer"
+     },
+     "owner": {
+      "type": "boolean",
+      "description": "This connection carries the audio"
+     },
+     "reason": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "description": "Why the last call ended: hangup, no carrier, busy, no answer, ended, modem gone, vowifid gone, or a dial error"
+     },
+     "path": {
+      "type": "string",
+      "enum": [
+       "wifi",
+       "modem"
+      ],
+      "description": "Voice path of the current call, or of the next call while idle. wifi: Wi-Fi Calling (sim-anywhere-vowifid, the carrier IMS over the internet); modem: the modem voice call"
+     },
+     "wifi": {
+      "type": "string",
+      "enum": [
+       "registered",
+       "connecting",
+       "error",
+       "off"
+      ],
+      "description": "Wi-Fi Calling registration on this node; off when sim-anywhere-vowifid is not running or is disabled"
+     }
+    }
+   },
+   "History": {
+    "type": "object",
+    "required": [
+     "fields",
+     "rows"
+    ],
+    "description": "Each row is an array in `fields` order. Numeric fields are numbers, missing values are null.",
+    "properties": {
+     "fields": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "example": [
+       "ts",
+       "epoch",
+       "present",
+       "usb_port",
+       "at_port",
+       "sim",
+       "rssi",
+       "rsrp",
+       "rsrq",
+       "sinr",
+       "reg",
+       "temp",
+       "oper",
+       "band",
+       "usb0_carrier",
+       "usb0_ip",
+       "rx",
+       "tx",
+       "disconnects",
+       "netifd_up",
+       "rrc",
+       "cellid",
+       "pci",
+       "earfcn"
+      ]
+     },
+     "rows": {
+      "type": "array",
+      "items": {
+       "type": "array",
+       "items": {
+        "type": [
+         "string",
+         "number",
+         "null"
+        ]
+       }
+      },
+      "example": [
+       [
+        "2025-01-15 12:00:00",
+        1736942400,
+        1,
+        "1-2",
+        "/dev/ttyUSB2",
+        "ready",
+        -65,
+        -95,
+        -10,
+        15,
+        1,
+        38,
+        "Example Carrier",
+        "3",
+        1,
+        "192.0.2.10/24",
+        102400,
+        204800,
+        0,
+        1,
+        "CONNECTED",
+        "example-cell",
+        1,
+        100
+       ]
+      ]
+     }
+    }
+   },
+   "ProxyStatus": {
+    "type": "object",
+    "required": [
+     "integrated",
+     "running"
+    ],
+    "properties": {
+     "integrated": {
+      "type": "boolean",
+      "description": "A Mihomo/Clash core was found on this node"
+     },
+     "running": {
+      "type": "boolean",
+      "description": "The detected core process is running"
+     },
+     "pid": {
+      "type": "integer",
+      "nullable": true,
+      "description": "Process ID of the core"
+     },
+     "gid": {
+      "type": "integer",
+      "nullable": true,
+      "description": "Group ID of the core process"
+     },
+     "core": {
+      "type": "string",
+      "nullable": true,
+      "description": "mihomo or clash",
+      "example": "mihomo"
+     },
+     "version": {
+      "type": "string",
+      "nullable": true,
+      "example": "v1.19.32"
+     },
+     "controller": {
+      "type": "string",
+      "nullable": true,
+      "description": "external-controller address",
+      "example": "127.0.0.1:9090"
+     },
+     "interface": {
+      "type": "string",
+      "nullable": true,
+      "description": "Dongle network interface",
+      "example": "usb0"
+     },
+     "exit": {
+      "type": "string",
+      "nullable": true,
+      "description": "Proxy on the 4G interface that the integrated core uses as its exit",
+      "example": "📶 Maxx"
+     },
+     "error": {
+      "type": "string",
+      "nullable": true
+     }
+    }
+   },
+   "ProxySelectRequest": {
+    "type": "object",
+    "required": [
+     "group",
+     "proxy"
+    ],
+    "properties": {
+     "group": {
+      "type": "string",
+      "description": "Proxy group name",
+      "example": "Google"
+     },
+     "proxy": {
+      "type": "string",
+      "description": "Member proxy the group should use",
+      "example": "📶 Maxx"
+     }
+    }
+   },
+   "ProxyMember": {
+    "type": "object",
+    "required": [
+     "name",
+     "type",
+     "selected"
+    ],
+    "properties": {
+     "name": {
+      "type": "string",
+      "example": "📶 Maxx"
+     },
+     "type": {
+      "type": "string",
+      "description": "Proxy type (direct, ss, vmess, selector, ...)",
+      "example": "direct"
+     },
+     "delay": {
+      "type": "integer",
+      "nullable": true,
+      "description": "Latest test delay in ms; null when untested",
+      "example": 351
+     },
+     "selected": {
+      "type": "boolean",
+      "description": "True when the group currently uses this proxy"
+     }
+    }
+   },
+   "ProxyGroup": {
+    "type": "object",
+    "required": [
+     "name",
+     "type",
+     "proxies"
+    ],
+    "properties": {
+     "name": {
+      "type": "string",
+      "example": "Google"
+     },
+     "type": {
+      "type": "string",
+      "enum": [
+       "selector",
+       "url-test",
+       "fallback"
+      ],
+      "example": "fallback"
+     },
+     "now": {
+      "type": "string",
+      "nullable": true,
+      "description": "Currently selected member",
+      "example": "📶 Maxx"
+     },
+     "proxies": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/ProxyMember"
+      }
+     }
+    }
+   },
+   "ProxyGroups": {
+    "type": "object",
+    "required": [
+     "exit",
+     "groups"
+    ],
+    "properties": {
+     "exit": {
+      "type": "string",
+      "description": "Name of the auto-detected 4G exit proxy",
+      "example": "📶 Maxx"
+     },
+     "interface": {
+      "type": "string",
+      "example": "usb0"
+     },
+     "server": {
+      "type": "object",
+      "required": [
+       "core"
+      ],
+      "properties": {
+       "core": {
+        "type": "string",
+        "description": "Integrated core name. Mihomo reports meta on GET /version; otherwise the core binary family is used",
+        "enum": [
+         "clash",
+         "mihomo"
+        ],
+        "example": "mihomo"
+       },
+       "version": {
+        "type": "string",
+        "nullable": true,
+        "description": "Core version from GET /version",
+        "example": "v1.19.32"
+       }
+      }
+     },
+     "groups": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/ProxyGroup"
+      }
+     }
+    }
+   },
+   "Quota": {
+    "type": "object",
+    "required": [
+     "cycle_on",
+     "plan",
+     "ratio",
+     "reset_day",
+     "daily_on",
+     "daily",
+     "cycle",
+     "used",
+     "day",
+     "day_used",
+     "block"
+    ],
+    "properties": {
+     "cycle_on": {
+      "type": "boolean",
+      "description": "true when the cycle limit (plan) is applied. When false, used is still counted but plan does not block data"
+     },
+     "plan": {
+      "type": "integer",
+      "description": "Configured cycle data limit in bytes; applied only when cycle_on is true; 0 = no cycle limit. Data is blocked at plan * ratio / 100"
+     },
+     "ratio": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Percentage of plan at which the cycle limit blocks; 100 = the full plan"
+     },
+     "reset_day": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 28,
+      "description": "Day of the month the cycle resets"
+     },
+     "cycle_mode": {
+      "type": "string",
+      "enum": [
+       "month",
+       "date",
+       "days"
+      ],
+      "description": "Cycle kind: natural month, day of month, or fixed days; absent on older nodes (day of month)"
+     },
+     "daily_on": {
+      "type": "boolean",
+      "description": "true when the daily limit is applied. When false, day_used is still counted but daily does not block data"
+     },
+     "daily": {
+      "type": "integer",
+      "description": "Configured daily limit in bytes; applied only when daily_on is true; 0 = no daily limit"
+     },
+     "cycle": {
+      "type": "string",
+      "format": "date",
+      "description": "Start date of the current cycle"
+     },
+     "next_reset": {
+      "type": "string",
+      "format": "date",
+      "description": "Start date of the next cycle, computed from the cycle kind (natural month, reset day of month, or fixed days from the billing start date); absent on older nodes"
+     },
+     "used": {
+      "type": "integer",
+      "description": "Bytes used in the current cycle (uplink rx + tx, corrected by the user)"
+     },
+     "day": {
+      "type": "string",
+      "format": "date",
+      "description": "Date of today's count, node local time"
+     },
+     "day_used": {
+      "type": "integer",
+      "description": "Bytes used today"
+     },
+     "block": {
+      "type": "string",
+      "enum": [
+       "",
+       "limit",
+       "daily"
+      ],
+      "description": "Why data is blocked: limit (cycle) or daily; empty = allowed"
+     },
+     "attached": {
+      "type": [
+       "boolean",
+       "null"
+      ],
+      "description": "Packet-domain attach state, read from the modem every minute (and after each block change); null when unknown"
+     }
+    }
+   }
+  },
+  "responses": {
+   "Error": {
+    "description": "Error",
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    }
+   },
+   "Updated": {
+    "description": "Archive rows changed",
+    "content": {
+     "application/json": {
+      "schema": {
+       "type": "object",
+       "properties": {
+        "updated": {
+         "type": "integer"
+        }
+       }
+      }
+     }
+    }
+   },
+   "Deleted": {
+    "description": "Archive rows removed",
+    "content": {
+     "application/json": {
+      "schema": {
+       "type": "object",
+       "properties": {
+        "deleted": {
+         "type": "integer"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ }
+}

@@ -1,0 +1,298 @@
+#!/usr/bin/python3
+# dongle-status: node data for luci-app-dongle.
+# Usage: dongle-status status | repair | gid | egress-ip | latency | logs <name> [lines]
+import ipaddress, json, os, subprocess, sys
+from collections import Counter
+
+sys.path.insert(0, "/usr/lib/dongle-vowifi")
+from gid import default_gid
+
+PROCD = ["sim-anywhere-calld", "sim-anywhere-vowifid", "sim-anywhere-quota", "uhttpd"]
+# The collector is not a service: it runs from cron, one line in /etc/crontabs/root. Nothing
+# restarts it, and an edited or commented line fails silently, so the status page checks the
+# line itself and `repair` puts it back.
+CRON = "/etc/crontabs/root"
+DETECTION = "/usr/bin/sim-anywhere-detection"
+OLD_DETECTION = "dongle-collect"          # a line that still says this is stale
+CRON_LINE = f"* * * * * {DETECTION} >/dev/null 2>&1"
+LOGS = {
+	"sim-anywhere-calld": ["logread", "-e", "sim-anywhere-calld"],
+	"sim-anywhere-vowifid": ["logread", "-e", "sim-anywhere-vowifid"],
+	"vowifi-calls": ["cat", "/root/dongle-vowifi-calls.log"],
+	"calls": ["cat", "/root/dongle-calls.tsv"],
+}
+PORTS = {"http": 80, "calls": 8765}
+
+
+def run(cmd):
+	try:
+		return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
+	except (OSError, subprocess.SubprocessError):
+		return ""
+
+
+def procd(name):
+	data = json.loads(run(["ubus", "call", "service", "list", json.dumps({"name": name})]) or "{}")
+	for inst in data.get(name, {}).get("instances", {}).values():
+		if inst.get("running"):
+			return {"running": True, "pid": inst.get("pid"), "gid": gid_of(inst.get("pid"))}
+	return {"running": False, "pid": None, "gid": None}
+
+
+def gid_of(pid):
+	try:
+		with open(f"/proc/{pid}/status") as f:
+			for line in f:
+				if line.startswith("Gid:"):
+					return int(line.split()[1])
+	except (OSError, TypeError, ValueError):
+		pass
+	return None
+
+
+def hex_ip(h):
+	if len(h) == 8:
+		return str(ipaddress.IPv4Address(bytes.fromhex(h)[::-1]))
+	# IPv6: four 32-bit words, each stored little-endian
+	raw = b"".join(bytes.fromhex(h[i:i + 8])[::-1] for i in range(0, 32, 8))
+	return str(ipaddress.IPv6Address(raw))
+
+
+def clients(port):
+	seen = Counter()
+	for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+		try:
+			with open(path) as f:
+				next(f)
+				for line in f:
+					cols = line.split()
+					# 01 is ESTABLISHED
+					if cols[3] != "01" or int(cols[1].split(":")[1], 16) != port:
+						continue
+					seen[hex_ip(cols[2].split(":")[0])] += 1
+		except OSError:
+			pass
+	return [{"ip": ip, "connections": n} for ip, n in sorted(seen.items())]
+
+
+def sample():
+	"""The collector's latest status.json, or None when it is missing or unreadable.
+
+	Every field the status page needs comes from this one sample, so the file is read once
+	per call instead of once per field.
+	"""
+	try:
+		with open("/tmp/dongle-web/status.json") as f:
+			return json.load(f)
+	except (OSError, ValueError):
+		return None
+
+
+def text(s, key):
+	"""A non-empty string field, else None."""
+	v = s.get(key) if isinstance(s, dict) else None
+	return v if isinstance(v, str) and v.strip() else None
+
+
+def device(s):
+	"""Insertion, interface, model and network state for the 设备状态 card.
+
+	present is 1/0, or None when the collector has not written a sample yet.
+	reg is the LTE registration state of AT+CEREG: 1 home, 5 roaming, 2 searching, 0/3/4 no.
+	"""
+	if s is None:
+		return {"present": None, "iface": None, "model": None, "net": {}}
+	return {"present": 1 if s.get("present") == 1 else 0,
+	        "iface": text(s, "usb0_dev"),
+	        "model": text(s, "model"),
+	        "net": {"sim": s.get("sim"), "reg": s.get("reg"), "oper": text(s, "oper")}}
+
+
+def wan_iface():
+	"""The interface the modem provides: network.dongle.device, default usb0."""
+	iface = text(sample(), "usb0_dev")
+	if not iface:
+		iface = run(["uci", "-q", "get", "network.dongle.device"]).strip()
+	return iface or "usb0"
+
+
+def iface_addr(iface):
+	"""The first IPv4 address of the interface, or "" when it has none.
+
+	curl must bind to the address, not the device name. `--interface usb0` pins the packet
+	to the device, but the route lookup still runs against the main table, where the only
+	default route is the LAN one — so the packet is dropped and curl times out. Binding to
+	the address picks up the netifd rule `from <addr> lookup <ip4table>` and the packet
+	leaves over the modem, which is what 出口 IP and 网络延迟 are meant to measure.
+	"""
+	for col in run(["ip", "-4", "-o", "addr", "show", "dev", iface]).split():
+		if col.count(".") == 3 and "/" in col:
+			return col.split("/")[0]
+	return ""
+
+
+def curl(args):
+	"""Run curl as the group OpenClash skips, so the probe is not proxied; hard timeout.
+
+	OpenClash redirects every TCP connection in nat OUTPUT into its proxy, so a plain
+	curl reports the proxy node's address instead of the modem's. Its output chains
+	return early for one group (the same one sim-anywhere-vowifid uses), so the probe runs
+	in that group.
+	"""
+	gid = default_gid() if os.geteuid() == 0 else None
+
+	def drop_gid():
+		if gid is not None:
+			os.setgid(gid)
+			os.setgroups([])
+
+	try:
+		r = subprocess.run(["curl", "-4"] + args, capture_output=True, text=True,
+		                   timeout=25, preexec_fn=drop_gid)
+		return r.stdout, r.returncode
+	except (OSError, subprocess.SubprocessError):
+		return "", 1
+
+
+def modem_curl(args):
+	"""curl arguments bound to the modem uplink, or an error dict when there is none.
+
+	Returns (args, None) to run, or (None, error_dict) when the interface is gone.
+	"""
+	iface = wan_iface()
+	if not os.path.exists("/sys/class/net/" + iface):
+		return None, {"ok": False, "iface": iface, "error": "接口 %s 不存在" % iface}
+	bind = iface_addr(iface)
+	if not bind:
+		return None, {"ok": False, "iface": iface, "error": "接口 %s 没有 IPv4 地址" % iface}
+	return ["--interface", bind] + args, None
+
+
+def egress_ip():
+	"""Public address as seen from the modem uplink, with Cloudflare's country code.
+
+	Cloudflare's trace endpoint is queried by IP, so no DNS is involved: OpenClash's
+	fake-IP DNS resolves a hostname like ip.fm to 198.18.x.x and its output chain sends
+	that connection to a proxy, whose address is what the old probe reported. The
+	`loc=` line is appended to the address as "(SG)".
+	"""
+	args, err = modem_curl(["-s", "--max-time", "12", "https://1.1.1.1/cdn-cgi/trace"])
+	if err:
+		return err
+	out, rc = curl(args)
+	ip = loc = ""
+	for line in out.splitlines():
+		if line.startswith("ip="):
+			ip = line[3:].strip()
+		elif line.startswith("loc="):
+			loc = line[4:].strip()
+	if ip:
+		return {"ok": True, "iface": wan_iface(),
+		        "value": "%s (%s)" % (ip, loc) if loc else ip}
+	return {"ok": False, "iface": wan_iface(),
+	        "error": "无法连接（curl 返回 %d）" % rc}
+
+
+def latency():
+	"""Round-trip time to Cloudflare's generate_204 over the modem uplink.
+
+	cp.cloudflare.com is pinned to 1.1.1.1 for the same reason as egress_ip: no DNS,
+	so the fake-IP resolver and the proxy redirect cannot answer for the modem.
+	"""
+	args, err = modem_curl(["-s", "-o", "/dev/null",
+	                        "-w", "%{http_code} %{time_total}", "--max-time", "12",
+	                        "--resolve", "cp.cloudflare.com:80:1.1.1.1",
+	                        "http://cp.cloudflare.com/generate_204"])
+	if err:
+		return err
+	out, rc = curl(args)
+	parts = out.split()
+	if rc != 0 or len(parts) != 2:
+		return {"ok": False, "iface": wan_iface(),
+		        "error": "无法连接（curl 返回 %d）" % rc}
+	try:
+		ms = int(round(float(parts[1]) * 1000))
+	except ValueError:
+		return {"ok": False, "iface": wan_iface(), "error": "返回格式异常"}
+	return {"ok": True, "iface": wan_iface(), "code": parts[0], "ms": ms}
+
+
+def cron_lines():
+	try:
+		with open(CRON) as f:
+			return f.read().splitlines()
+	except OSError:
+		return []
+
+
+def cron_problem():
+	"""None when the collector is scheduled, else a short reason for the status page."""
+	if not os.access(DETECTION, os.X_OK):
+		return f"{DETECTION} 不存在或不可执行"
+	ours = [l for l in cron_lines() if DETECTION in l or OLD_DETECTION in l]
+	if not ours:
+		return "计划任务里没有采集脚本"
+	active = [l for l in ours if not l.lstrip().startswith("#")]
+	if not active:
+		return "计划任务里的采集脚本被注释掉了"
+	if not any(DETECTION in l for l in active):
+		return f"计划任务仍指向旧脚本 {OLD_DETECTION}"
+	return None
+
+
+def repair():
+	"""Put the cron line back. Only lines that mention the collector are replaced, so the rest
+	of the crontab (OpenClash, the user's own jobs) is kept as it is."""
+	keep = [l for l in cron_lines() if DETECTION not in l and OLD_DETECTION not in l]
+	keep.append(CRON_LINE)
+	tmp = CRON + ".new"
+	with open(tmp, "w") as f:
+		f.write("\n".join(keep) + "\n")
+	os.chmod(tmp, 0o600)
+	os.rename(tmp, CRON)
+	# cron watches /etc/crontabs with a procd file trigger; the reload makes it immediate.
+	run(["/etc/init.d/cron", "reload"])
+	return {"ok": cron_problem() is None, "problem": cron_problem(), "line": CRON_LINE}
+
+
+def status():
+	services = [dict(name=name, type="procd", **procd(name)) for name in PROCD]
+	try:
+		last = int(os.path.getmtime("/tmp/dongle-web/status.json"))
+	except OSError:
+		last = None
+	services.append({"name": "sim-anywhere-detection", "type": "cron", "last_run": last,
+	                 "problem": cron_problem()})
+	dev = device(sample())
+	return {
+		"present": dev["present"],
+		"iface": dev["iface"],
+		"model": dev["model"],
+		"net": dev["net"],
+		"services": services,
+		"clients": {name: clients(port) for name, port in PORTS.items()},
+	}
+
+
+def main(argv):
+	if argv == ["status"]:
+		print(json.dumps(status()))
+	elif argv == ["repair"]:
+		print(json.dumps(repair()))
+	elif argv == ["gid"]:
+		print(default_gid())
+	elif argv == ["egress-ip"]:
+		print(json.dumps(egress_ip()))
+	elif argv == ["latency"]:
+		print(json.dumps(latency()))
+	elif len(argv) in (2, 3) and argv[0] == "logs" and argv[1] in LOGS:
+		n = int(argv[2]) if len(argv) == 3 else 200
+		if not 1 <= n <= 2000:
+			sys.exit("lines must be 1..2000")
+		print("\n".join(run(LOGS[argv[1]]).splitlines()[-n:]))
+	else:
+		sys.exit("usage: dongle-status status | repair | gid | egress-ip | latency | logs <name> [lines]")
+
+
+if __name__ == "__main__":
+	main(sys.argv[1:])

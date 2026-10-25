@@ -1,0 +1,40 @@
+#!/bin/sh
+# dongle-at: AT actions for the dongle API.
+#   dongle-at sync        move new SMS from the modem into the archive
+#   dongle-at send PDU    send one SMS-SUBMIT PDU (SMSC octet 00), archive it, print its uid
+#   dongle-at cmd AT [S]  send one AT command, print the response lines (S: seconds to wait for each line, default 5)
+# On failure: message on stdout, non-zero exit.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+. /usr/lib/dongle-at.sh
+
+exec 9>"$AT_LOCK"
+timeout 30 flock 9 || { echo "AT port busy"; exit 75; }   # busybox flock has no -w; the lock stays with fd 9
+AT_PORT=$(cat "$ATCACHE" 2>/dev/null)
+[ -n "$AT_PORT" ] && at_open "$AT_PORT" || { echo "AT port not ready"; exit 69; }
+
+case "$1" in
+  sync)
+    sms_sync ;;
+  send)
+    PDU=$2; LEN=$(( ${#PDU} / 2 - 1 ))
+    case "$PDU" in 00*[!0-9A-F]*|"") at_close; echo "bad pdu"; exit 64 ;; 00*) ;; *) at_close; echo "bad pdu"; exit 64 ;; esac
+    [ "$LEN" -ge 7 ] && [ "$LEN" -le 176 ] || { at_close; echo "bad pdu"; exit 64; }
+    at_cmd 'AT+CMGF=0' >/dev/null
+    printf 'AT+CMGS=%d\r' "$LEN" >&3
+    sleep 1                                   # wait for the "> " prompt
+    printf '%s\032' "$PDU" >&3
+    R=$(AT_T=60 at_read "$PDU")
+    at_close
+    case "$R" in
+      *"+CMGS:"*)
+        U=$(echo "$PDU $(date +%s)" | md5sum | cut -c1-12)
+        printf '%s\tout\t%s\t1\t%s\n' "$U" "$(date +%s)" "$PDU" >> "$SMS"
+        echo "$U"; exit 0 ;;
+      *) echo "$R" | grep ERROR | head -1; exit 70 ;;
+    esac ;;
+  cmd)
+    case "$2" in [Aa][Tt]*) ;; *) at_close; echo "bad command"; exit 64 ;; esac
+    AT_T=${3:-5} at_cmd "$2" ;;
+  *) at_close; echo "usage: dongle-at sync | send PDU | cmd AT [S]"; exit 64 ;;
+esac
+at_close

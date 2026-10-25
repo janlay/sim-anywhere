@@ -1,0 +1,17 @@
+#!/bin/sh /etc/rc.common
+USE_PROCD=1
+START=96
+STOP=05
+
+start_service() {
+    # Nothing to advertise without the modem: the API it points at is not running
+    # either. The hotplug handler starts it when the dongle is inserted.
+    /usr/bin/dongle-present || return 0
+    procd_open_instance
+    procd_set_param command /usr/bin/python3 -u /usr/bin/dongle-announce
+    procd_set_param respawn 3600 5 0
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param pidfile /var/run/dongle-announce.pid
+    procd_close_instance
+}

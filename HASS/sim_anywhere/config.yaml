@@ -1,0 +1,18 @@
+name: SIM Anywhere
+slug: sim_anywhere
+version: 26.10.25-1
+description: >-
+  Show the SIM Anywhere monitor page of an OpenWrt node in the sidebar.
+startup: application
+boot: auto
+init: false
+arch:
+  - aarch64
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:signal-cellular-3
+panel_title: SIM Anywhere
+options:
+  host: openwrt.local
+schema:
+  host: str

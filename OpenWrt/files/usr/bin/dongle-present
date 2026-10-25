@@ -1,0 +1,11 @@
+#!/bin/sh
+# dongle-present: exit 0 when the 4G dongle (USB 2ca3:4006) is on the USB bus.
+# Used by the service init scripts and the hotplug handler: without the modem there is
+# nothing to call or to register with IMS, so the services stay down and only the
+# collector (cron) keeps running.
+for d in /sys/bus/usb/devices/*; do
+	[ -f "$d/idVendor" ] || continue
+	[ "$(cat "$d/idVendor" 2>/dev/null)" = 2ca3 ] || continue
+	[ "$(cat "$d/idProduct" 2>/dev/null)" = 4006 ] && exit 0
+done
+exit 1

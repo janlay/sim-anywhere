@@ -1,0 +1,10 @@
+#!/usr/bin/python3
+import os, sys
+sys.path.insert(0, "/usr/lib/dongle-vowifi")
+from gid import effective_gid
+# The OpenClash rule (openclash_output: --gid-owner N -j RETURN) makes OpenClash skip this process, so the IKE/ESP
+# packets leave on usb0 with fwmark 0x401. Through the OpenClash proxy the source address changes when url-test
+# switches nodes, and the ePDG then drops the SA. N comes from the firewall (gid.py); UCI dongle.vowifi.gid overrides it.
+os.setgid(effective_gid())
+from daemon import main
+main()

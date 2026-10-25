@@ -1,0 +1,529 @@
+#!/usr/bin/ucode
+// sim-anywhere-api: JSON API for the 4G dongle (CGI). Spec: /sim-anywhere/openapi.json
+//   GET    /status                  latest sample
+//   GET    /history?window=|since=  samples, columnar
+//   GET    /sms?box=in|out          messages (long SMS merged)
+//   POST   /sms {to,text,dry_run}   send (or count parts)
+//   POST   /sms/sync                pull new SMS from the modem
+//   PATCH  /sms[/{id}] {read,ids}   mark read / unread
+//   DELETE /sms[/{id}][?ids=]       delete from the archive
+//   GET    /calls                   call log (written by sim-anywhere-calld; calls use ws://<host>:8765/call)
+//   DELETE /calls?ids=              delete call log entries
+//   POST   /at {command,timeout}    send one AT command to the modem, return its response lines
+//   GET    /proxy/status            clash integration status, PID/GID and the 4G exit proxy
+//   GET    /proxy/groups            clash proxy groups that use the 4G exit proxy (503 if clash not integrated)
+//   POST   /proxy/select {group,proxy}  switch a clash group's proxy and reload its config
+//   POST   /proxy/ping [{proxy}]    delay-test the exit proxy (or a named one), update its history
+//   POST   /proxy/test [{group}]    delay-test every member of every listed group, or one group
+//   GET    /quota                   data plan: cycle and today's usage in bytes, limits, block state (sim-anywhere-quota)
+//   POST   /discovery/hello         an app connected: stop the LAN broadcast when configured
+//
+// While the dongle is unplugged every endpoint except `/` and `/status` answers 503
+// ({"error": "dongle not present", "present": 0}): there is nothing to serve without it.
+'use strict';
+const fs = require('fs');
+
+const STATUS = '/tmp/dongle-web/status.json';
+const HIST = '/root/dongle-history.csv';
+const SMS = '/root/dongle-sms.tsv';
+const CALLS = '/root/dongle-calls.tsv';
+const CALLS_LOCK = '/var/lock/dongle-calls.lock';
+const LOCK = '/var/lock/sim-anywhere-detection.lock';
+const SPEC = '/sim-anywhere/openapi.json';
+const PRESENT_HELPER = '/usr/bin/dongle-present';
+const NUMERIC = { epoch: 1, present: 1, rssi: 1, rsrp: 1, rsrq: 1, sinr: 1, reg: 1, temp: 1, usb0_carrier: 1,
+	rx: 1, tx: 1, disconnects: 1, netifd_up: 1 };   // band and cell fields stay strings, as in /status
+
+/* ---------- live network counters ---------- */
+// Same source as LuCI's interface page: the kernel counters in /proc/net/dev (rx bytes, tx bytes) and the carrier file.
+function live_net(dev) {
+	let rx = null, tx = null;
+	for (let l in split(fs.readfile('/proc/net/dev') || '', '\n')) {
+		let p = index(l, ':');
+		if (p < 0 || trim(substr(l, 0, p)) != dev) continue;
+		let f = split(trim(substr(l, p + 1)), /\s+/);
+		rx = int(f[0]);
+		tx = int(f[8]);
+	}
+	if (rx == null) return null;
+	let carrier = fs.readfile(`/sys/class/net/${dev}/carrier`);
+	return { rx, tx, carrier: carrier == null ? null : int(trim(carrier)), epoch: time() };
+}
+
+/* ---------- HTTP ---------- */
+const REASON = { '200': 'OK', '201': 'Created', '400': 'Bad Request', '404': 'Not Found', '405': 'Method Not Allowed',
+	'415': 'Unsupported Media Type', '502': 'Bad Gateway', '503': 'Service Unavailable' };
+function reply(code, body) {
+	print(`Status: ${code} ${REASON['' + code]}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\n\r\n`);
+	print(sprintf('%J', body), '\n');
+	exit(0);
+}
+function fail(code, msg) { reply(code, { error: msg }); }
+
+/* ---------- device gate ---------- */
+// Without the modem there is nothing to answer with, so every endpoint that talks to it
+// returns 503 instead of stale or empty data. `/` and `/status` stay available: they are how
+// a client tells "node up, no dongle" (present: 0) from "node unreachable".
+//
+// The check is the same helper the init scripts use, so there is one definition of "plugged
+// in". uhttpd itself is stopped at boot and on removal (see /etc/init.d/dongle-gate), so this
+// mostly covers the window before it goes down and nodes where that gate is disabled.
+function present() {
+	let p = fs.popen(PRESENT_HELPER);
+	if (!p) return true;          // cannot tell: never take the API down on a guess
+	p.read('all');
+	return p.close() != 1;        // 0 plugged in, 1 absent, 127 helper missing
+}
+
+const METHOD = getenv('REQUEST_METHOD') || 'GET';
+const PATH = split(trim(getenv('PATH_INFO') || '/', '/'), '/');
+const Q = {};
+for (let kv in split(getenv('QUERY_STRING') || '', '&')) {
+	let p = split(kv, '=', 2);
+	if (p[0] != '') Q[p[0]] = replace(p[1] ?? '', /%2[Cc]/g, ',');
+}
+// write requests must be JSON: a cross-site page cannot send that without a CORS preflight
+function body() {
+	if (!match(getenv('CONTENT_TYPE') || '', /^application\/json/)) fail(415, 'Content-Type must be application/json');
+	let n = int(getenv('CONTENT_LENGTH') || 0);
+	let b = n > 0 ? json(fs.stdin.read(n) || 'null') : null;
+	return type(b) == 'object' ? b : {};
+}
+
+/* ---------- UTF-8 ---------- */
+function u8(cp) {
+	if (cp < 0x80) return chr(cp);
+	if (cp < 0x800) return chr(0xC0 | (cp >> 6), 0x80 | (cp & 63));
+	if (cp < 0x10000) return chr(0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63));
+	return chr(0xF0 | (cp >> 18), 0x80 | ((cp >> 12) & 63), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63));
+}
+function cps(s) {
+	let o = [], n = length(s);
+	for (let i = 0; i < n;) {
+		let c = ord(s, i), k = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+		let v = k == 1 ? c : c & (0xFF >> (k + 1));
+		for (let j = 1; j < k; j++) v = (v << 6) | (ord(s, i + j) & 63);
+		push(o, v); i += k;
+	}
+	return o;
+}
+
+/* ---------- SMS PDU (3GPP TS 23.040) ---------- */
+const GSM = [64,163,36,165,232,233,249,236,242,199,10,216,248,13,197,229,916,95,934,915,923,937,928,936,931,920,926,27,198,230,223,201,
+	32,33,34,35,164,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,
+	161,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,196,214,209,220,167,
+	191,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,228,246,241,252,224];
+const GSMX = { '10': 12, '20': 94, '40': 123, '41': 125, '47': 92, '60': 91, '61': 126, '62': 93, '64': 124, '101': 8364 };
+const GSMR = {}, GSMXR = {};
+for (let i = 0; i < 128; i++) if (i != 27) GSMR[GSM[i]] = i;
+for (let k in GSMX) GSMXR[GSMX[k]] = +k;
+
+function hexb(h) { let o = []; for (let i = 0; i + 1 < length(h); i += 2) push(o, hex(substr(h, i, 2))); return o; }
+function bhex(b) { return join('', map(b, x => sprintf('%02X', x))); }
+function bcd(x) { return (x & 15) * 10 + (x >> 4); }
+function unpack7(b, n) {
+	let o = [];
+	for (let k = 0; k < n; k++) { let bit = k * 7, i = bit >> 3, s = bit & 7; push(o, ((b[i] >> s) | ((b[i + 1] ?? 0) << (8 - s))) & 127); }
+	return o;
+}
+function pack7(sp) {
+	let n = int((length(sp) * 7 + 7) / 8), o = [];
+	for (let i = 0; i < n; i++) push(o, 0);
+	for (let k = 0; k < length(sp); k++) {
+		let bit = k * 7, i = bit >> 3, s = bit & 7;
+		o[i] |= (sp[k] << s) & 255;
+		if (s > 1 && i + 1 < n) o[i + 1] |= sp[k] >> (8 - s);
+	}
+	return o;
+}
+function gsmText(sp) {
+	let t = '';
+	for (let k = 0; k < length(sp); k++) {
+		if (sp[k] == 27 && k + 1 < length(sp)) { k++; t += u8(GSMX['' + sp[k]] ?? 32); }
+		else t += u8(GSM[sp[k]]);
+	}
+	return t;
+}
+function utf16(b) {
+	let t = '';
+	for (let k = 0; k + 1 < length(b); k += 2) {
+		let u = (b[k] << 8) | b[k + 1];
+		if (u >= 0xD800 && u < 0xDC00 && k + 3 < length(b)) { k += 2; u = 0x10000 + ((u - 0xD800) << 10) + ((((b[k] << 8) | b[k + 1])) - 0xDC00); }
+		t += u8(u);
+	}
+	return t;
+}
+function smsDecode(pdu) {
+	let b = hexb(pdu), i = b[0] + 1, fo = b[i++], mti = fo & 3, udhi = fo & 64;
+	if (mti == 1) i++;                                   // message reference
+	let al = b[i++], toa = b[i++], ao = slice(b, i, i + int((al + 1) / 2)), num;
+	i += length(ao);
+	if ((toa & 0x70) == 0x50) num = gsmText(unpack7(ao, int(al * 4 / 7)));
+	else num = ((toa & 0x70) == 0x10 ? '+' : '') + substr(join('', map(ao, x => sprintf('%x%x', x & 15, x >> 4))), 0, al);
+	i++;
+	let dcs = b[i++], ts = null;
+	if (mti == 0) {
+		let s = slice(b, i, i + 7), tz = ((s[6] & 7) * 10 + (s[6] >> 4)) * ((s[6] & 8) ? -1 : 1);
+		i += 7;
+		ts = timegm({ year: 2000 + bcd(s[0]), mon: bcd(s[1]), mday: bcd(s[2]), hour: bcd(s[3]), min: bcd(s[4]), sec: bcd(s[5]) }) - tz * 900;
+	}
+	else { let vpf = (fo >> 3) & 3; i += vpf == 2 ? 1 : vpf ? 7 : 0; }
+	let udl = b[i++], ud = slice(b, i);
+	let alph = (dcs & 0xC0) == 0 ? (dcs >> 2) & 3 : (dcs & 0xF0) == 0xF0 ? ((dcs & 4) ? 1 : 0) : (dcs & 0xF0) == 0xE0 ? 2 : 0;
+	let hl = 0, part = null;
+	if (udhi) {
+		hl = ud[0] + 1;
+		for (let k = 1; k < hl;) {
+			let id = ud[k], l = ud[k + 1], v = slice(ud, k + 2, k + 2 + l);
+			if (id == 0) part = { ref: v[0], total: v[1], seq: v[2] };
+			else if (id == 8) part = { ref: (v[0] << 8) | v[1], total: v[2], seq: v[3] };
+			k += 2 + l;
+		}
+	}
+	let text;
+	if (alph == 0) text = gsmText(slice(unpack7(ud, udl), int((hl * 8 + 6) / 7)));
+	else if (alph == 2) text = utf16(slice(ud, hl, udl));
+	else text = join('', map(slice(ud, hl, udl), x => u8(x)));
+	return { num, ts, text, part };
+}
+// SMS-SUBMIT PDUs (hex, SMSC octet 00); multipart when needed
+function smsEncode(to, text, ref) {
+	let cp = cps(text), gsm = true, units = [];
+	for (let c in cp) if (!exists(GSMR, c) && !exists(GSMXR, c)) gsm = false;
+	for (let c in cp) {
+		if (gsm) push(units, exists(GSMR, c) ? [GSMR[c]] : [27, GSMXR[c]]);
+		else if (c >= 0x10000) push(units, [0xD800 + ((c - 0x10000) >> 10), 0xDC00 + ((c - 0x10000) & 1023)]);
+		else push(units, [c]);
+	}
+	let total = 0, chunks = [], cur = [], per = gsm ? 153 : 67;
+	for (let u in units) total += length(u);
+	if (total <= (gsm ? 160 : 70)) { for (let u in units) push(cur, ...u); push(chunks, cur); }
+	else {
+		for (let u in units) { if (length(cur) + length(u) > per) { push(chunks, cur); cur = []; } push(cur, ...u); }
+		if (length(cur)) push(chunks, cur);
+	}
+	let d = replace(to, /[^0-9+]/g, ''), intl = substr(d, 0, 1) == '+', dg = replace(d, '+', '');
+	let ds = length(dg) % 2 ? dg + 'F' : dg, da = '';
+	for (let i = 0; i < length(ds); i += 2) da += substr(ds, i + 1, 1) + substr(ds, i, 1);
+	let pdus = [];
+	for (let k = 0; k < length(chunks); k++) {
+		let c = chunks[k], multi = length(chunks) > 1, udh = multi ? [5, 0, 3, ref & 255, length(chunks), k + 1] : [], ud, udl;
+		if (gsm) {
+			let sp = multi ? [0, 0, 0, 0, 0, 0, 0] : [];
+			push(sp, ...c); ud = pack7(sp); udl = length(sp);
+			for (let j = 0; j < length(udh); j++) ud[j] = udh[j];
+		}
+		else {
+			ud = [...udh];
+			for (let u in c) push(ud, u >> 8, u & 255);
+			udl = length(ud);
+		}
+		push(pdus, '00' + bhex([multi ? 0x41 : 0x01, 0, length(dg), intl ? 0x91 : 0x81]) + uc(da) + bhex([0, gsm ? 0 : 8, udl]) + bhex(ud));
+	}
+	return { encoding: gsm ? 'gsm7' : 'ucs2', pdus };
+}
+
+/* ---------- archive ---------- */
+function iso(t) { let g = gmtime(t); return sprintf('%04d-%02d-%02dT%02d:%02d:%02dZ', g.year, g.mon, g.mday, g.hour, g.min, g.sec); }
+function rows() {
+	let o = [];
+	for (let l in split(fs.readfile(SMS) || '', '\n')) {
+		let r = split(l, '\t');
+		if (length(r) == 5) push(o, { uid: r[0], box: r[1], epoch: +r[2], read: r[3] == '1', pdu: r[4] });
+	}
+	return o;
+}
+function messages() {
+	let groups = {}, order = [];
+	for (let r in rows()) {
+		let m;
+		try { m = smsDecode(r.pdu); } catch (e) { m = { num: '', ts: null, text: '', part: null }; }
+		let key = m.part ? `${r.box}|${m.num}|${m.part.ref}|${m.part.total}` : r.uid;
+		let g = groups[key];
+		if (!g) { g = groups[key] = { box: r.box, number: m.num, epoch: m.ts ?? r.epoch, read: true, total: m.part ? m.part.total : 1, parts: [] }; push(order, key); }
+		push(g.parts, { seq: m.part ? m.part.seq : 1, uid: r.uid, text: m.text });
+		g.read = g.read && r.read;
+		let t = m.ts ?? r.epoch; if (t < g.epoch) g.epoch = t;
+	}
+	let out = map(order, k => {
+		let g = groups[k];
+		g.parts = sort(g.parts, (a, b) => a.seq - b.seq);
+		return { id: join('-', map(g.parts, p => p.uid)), box: g.box, number: g.number, time: iso(g.epoch), epoch: g.epoch,
+			read: g.read, text: join('', map(g.parts, p => p.text)), parts: length(g.parts), total: g.total };
+	});
+	return sort(out, (a, b) => b.epoch - a.epoch);
+}
+// message ids -> archive uids
+function uids(ids) {
+	let o = {};
+	for (let id in ids) {
+		if (type(id) != 'string' || !match(id, /^[0-9a-f]{12}(-[0-9a-f]{12})*$/)) fail(400, `bad id: ${id}`);
+		for (let u in split(id, '-')) o[u] = true;
+	}
+	if (!length(o)) fail(400, 'no ids');
+	return o;
+}
+// rewrite the archive under the AT lock; fn(row) returns the row to keep or null
+function rewrite(set, fn) {
+	let lk = fs.open(LOCK, 'w');
+	lk.lock('x');
+	let n = 0, out = '';
+	for (let r in rows()) {
+		let hit = set[r.uid];
+		if (hit) n++;
+		r = hit ? fn(r) : r;
+		if (r) out += join('\t', [r.uid, r.box, r.epoch, r.read ? 1 : 0, r.pdu]) + '\n';
+	}
+	if (n) { fs.writefile(SMS + '.tmp', out); fs.rename(SMS + '.tmp', SMS); }
+	lk.close();
+	if (!n) fail(404, 'message not found');
+	return n;
+}
+// single-quote for the shell
+function sq(s) { return "'" + replace(s, "'", "'\\''") + "'"; }
+function at(args) {
+	let p = fs.popen('/usr/bin/dongle-at ' + args), out = trim(p.read('all') || ''), rc = p.close();
+	return { ok: rc == 0, out };
+}
+
+/* ---------- history ---------- */
+function history() {
+	let now = time(), since = Q.since != null ? int(Q.since) : now - int(Q.window ?? 86400);
+	let lines = split(fs.readfile(HIST) || '', '\n'), fields = split(lines[0], ','), out = [];
+	for (let i = length(lines) - 1; i > 0; i--) {
+		let c = split(lines[i], ',');
+		if (length(c) < 2) continue;
+		if (+c[1] <= since) break;
+		let r = [];
+		for (let k = 0; k < length(fields); k++) {
+			let v = c[k] ?? '';
+			push(r, v == '' ? null : NUMERIC[fields[k]] ? +v : v);
+		}
+		push(out, r);
+	}
+	return { fields, rows: reverse(out) };
+}
+
+/* ---------- call log ---------- */
+function calls() {
+	let o = [];
+	for (let l in split(fs.readfile(CALLS) || '', '\n')) {
+		let r = split(l, '\t');
+		if (length(r) == 6) push(o, { id: r[0], dir: r[1], number: r[3], time: iso(+r[2]), epoch: +r[2], answered: r[4] == '1', duration: +r[5] });
+	}
+	return reverse(o);
+}
+function call_ids(ids) {
+	let o = {};
+	for (let id in ids) {
+		if (type(id) != 'string' || !match(id, /^[0-9a-f]{12}$/)) fail(400, `bad id: ${id}`);
+		o[id] = true;
+	}
+	if (!length(o)) fail(400, 'no ids');
+	return o;
+}
+// sim-anywhere-calld appends to the log under the same lock.
+function rewrite_calls(set) {
+	let lk = fs.open(CALLS_LOCK, 'w');
+	lk.lock('x');
+	let n = 0, out = [];
+	for (let l in split(fs.readfile(CALLS) || '', '\n')) {
+		let r = split(l, '\t');
+		if (length(r) != 6) continue;
+		if (set[r[0]]) { n++; continue; }
+		push(out, l);
+	}
+	if (n) {
+		fs.writefile(CALLS + '.tmp', length(out) ? join('\n', out) + '\n' : '');
+		fs.rename(CALLS + '.tmp', CALLS);
+	}
+	lk.close();
+	return n;
+}
+
+/* ---------- status stream ---------- */
+// NDJSON, one record per second: epoch, rx, tx (usb0 bytes since boot), usb0_carrier. When the collector writes a new
+// sample (about once a minute), that record also carries the sample's fields (ts, epoch and AT-based) and sample_epoch.
+const STREAM_SKIP = { rx: 1, tx: 1, usb0_carrier: 1 };
+function status_stream(seconds) {
+	if (seconds < 1 || seconds > 3600) fail(400, 'seconds must be 1-3600');
+	print('Status: 200 OK\r\nContent-Type: application/x-ndjson; charset=utf-8\r\nCache-Control: no-store\r\n\r\n');
+	let end = time() + seconds, sample_epoch = null;
+	while (time() < end) {
+		let s = json(fs.readfile(STATUS) || 'null') ?? {};
+		let live = live_net(s.usb0_dev ?? 'usb0');
+		let rec = { epoch: time(), rx: live ? live.rx : null, tx: live ? live.tx : null,
+			usb0_carrier: live ? live.carrier : null };
+		if (s.epoch != null && s.epoch != sample_epoch) {
+			sample_epoch = s.epoch;
+			for (let k in keys(s))
+				if (!STREAM_SKIP[k]) rec[k] = s[k];
+			rec.sample_epoch = s.epoch;
+		}
+		print(sprintf('%J', rec), '\n');
+		fs.stdout.flush();
+		sleep(1000);
+	}
+	exit(0);
+}
+
+/* ---------- routes ---------- */
+let r0 = PATH[0] ?? '', r1 = PATH[1];
+if (r0 == '') {
+	if (METHOD != 'GET') fail(405, 'method not allowed');
+	reply(200, { name: 'SIM Anywhere API', spec: SPEC, endpoints: ['status', 'history', 'sms', 'sms/sync', 'calls', 'at', 'quota', 'proxy/status', 'proxy/groups', 'proxy/select', 'proxy/ping', 'proxy/test', 'discovery/hello'] });
+}
+if (r0 == 'status' && r1 == null) {
+	if (METHOD != 'GET') fail(405, 'method not allowed');
+	status_stream(int(Q.seconds ?? 3600));
+}
+// Everything below needs the modem. /status above and the index stay reachable so a client
+// can see why (present: 0) instead of a bare failure.
+if (!present()) reply(503, { error: 'dongle not present', present: 0 });
+if (r0 == 'history' && r1 == null) {
+	if (METHOD != 'GET') fail(405, 'method not allowed');
+	reply(200, history());
+}
+if (r0 == 'at' && r1 == null) {
+	if (METHOD != 'POST') fail(405, 'method not allowed');
+	let b = body(), cmd = trim('' + (b.command ?? '')), t = int(b.timeout ?? 5);
+	if (!match(cmd, /^[Aa][Tt][[:print:]]{0,254}$/)) fail(400, 'command must start with AT and be printable ASCII');
+	if (t < 1 || t > 180) fail(400, 'timeout must be 1-180 seconds');
+	let a = at('cmd ' + sq(cmd) + ' ' + t);
+	if (!a.ok) fail(503, a.out || 'AT port not ready');
+	let lines = filter(split(a.out, '\n'), l => l != ''), last = lines[length(lines) - 1] ?? '';
+	let done = last == 'OK' || last == 'ERROR' || match(last, /^\+CM[ES] ERROR/);
+	reply(200, { command: cmd, lines: done ? slice(lines, 0, -1) : lines, result: done ? last : 'TIMEOUT' });
+}
+if (r0 == 'calls' && r1 == null) {
+	if (METHOD == 'GET') reply(200, { calls: calls() });
+	if (METHOD == 'DELETE') {
+		let n = rewrite_calls(call_ids(split(Q.ids ?? '', ',')));
+		if (!n) fail(404, 'call not found');
+		reply(200, { deleted: n });
+	}
+	fail(405, 'method not allowed');
+}
+if (r0 == 'sms') {
+	if (r1 == 'sync') {
+		if (METHOD != 'POST') fail(405, 'method not allowed');
+		body();
+		let a = at('sync');
+		a.ok ? reply(200, { synced: true }) : fail(503, a.out);
+	}
+	if (METHOD == 'GET' && r1 == null) {
+		let m = messages();
+		if (Q.box) m = filter(m, x => x.box == Q.box);
+		reply(200, { unread: length(filter(m, x => x.box == 'in' && !x.read)), messages: m });
+	}
+	if (METHOD == 'POST' && r1 == null) {
+		let b = body(), to = trim('' + (b.to ?? '')), text = '' + (b.text ?? '');
+		if (!match(to, /^\+?[0-9][0-9 -]{1,19}$/)) fail(400, 'bad recipient');
+		if (text == '') fail(400, 'empty text');
+		let e = smsEncode(to, text, int(time() % 256));
+		if (length(e.pdus) > 10) fail(400, 'text too long (max 10 parts)');
+		if (b.dry_run) reply(200, { encoding: e.encoding, parts: length(e.pdus) });
+		let sent = [];
+		for (let p in e.pdus) {
+			let a = at('send ' + p);
+			if (!a.ok) reply(502, { error: a.out || 'send failed', sent: length(sent), parts: length(e.pdus) });
+			push(sent, a.out);
+		}
+		reply(201, { id: join('-', sent), encoding: e.encoding, parts: length(e.pdus) });
+	}
+	if (METHOD == 'PATCH') {
+		let b = body();
+		if (type(b.read) != 'bool') fail(400, 'read must be boolean');
+		let n = rewrite(uids(r1 != null ? [r1] : b.ids), r => { r.read = b.read; return r; });
+		reply(200, { updated: n });
+	}
+	if (METHOD == 'DELETE') {
+		let n = rewrite(uids(r1 != null ? [r1] : split(Q.ids ?? '', ',')), r => null);
+		reply(200, { deleted: n });
+	}
+	fail(405, 'method not allowed');
+}
+/* ---------- LAN discovery (see /usr/bin/dongle-announce) ---------- */
+// An app announces itself after it connects. With dongle.discovery.stop_on_connect the node then
+// stops broadcasting; the LuCI button (`dongle-announce resume`) starts it again until the next app.
+if (r0 == 'discovery' && r1 == 'hello' && PATH[2] == null) {
+	if (METHOD != 'POST') fail(405, 'method not allowed');
+	body();
+	let p = fs.popen('/usr/bin/dongle-announce pause'), out = trim(p.read('all') || ''), rc = p.close();
+	let d = null;
+	try { d = json(out); } catch (e) {}
+	if (rc != 0) fail(502, out || 'discovery helper failed');
+	reply(200, d ?? { paused: null });
+}
+/* ---------- data plan (see /usr/bin/sim-anywhere-quota) ---------- */
+if (r0 == 'quota' && r1 == null) {
+	if (METHOD != 'GET') fail(405, 'method not allowed');
+	let p = fs.popen('/usr/bin/sim-anywhere-quota status'), out = trim(p.read('all') || ''), rc = p.close();
+	let d = null;
+	try { d = json(out); } catch (e) {}
+	if (rc != 0 || type(d) != 'object') fail(502, 'quota helper failed');
+	reply(200, d);
+}
+/* ---------- clash proxy groups (integration auto-detected; see /usr/bin/dongle-clash) ---------- */
+// helper exit codes: 0 ok; 3 clash not integrated or no 4G exit proxy; anything else carries {"error"}
+function clash(args) {
+	let p = fs.popen('/usr/bin/dongle-clash ' + args), out = trim(p.read('all') || ''), rc = p.close();
+	let d = null;
+	try { d = json(out); } catch (e) {}
+	return { rc, msg: (type(d) == 'object' && d.error) ? d.error : out, data: d };
+}
+if (r0 == 'proxy' && r1 == 'status' && PATH[2] == null) {
+	if (METHOD != 'GET') fail(405, 'method not allowed');
+	let c = clash('status');
+	if (c.rc != 0) fail(502, c.msg || 'clash helper failed');
+	reply(200, c.data);
+}
+if (r0 == 'proxy' && r1 == 'groups' && PATH[2] == null) {
+	if (METHOD != 'GET') fail(405, 'method not allowed');
+	let c = clash('groups');
+	if (c.rc == 3) fail(503, c.msg);
+	if (c.rc != 0) fail(502, c.msg || 'clash helper failed');
+	reply(200, c.data);
+}
+if (r0 == 'proxy' && r1 == 'select' && PATH[2] == null) {
+	if (METHOD != 'POST') fail(405, 'method not allowed');
+	let b = body(), group = b.group, proxy = b.proxy;
+	if (type(group) != 'string' || group == '' || type(proxy) != 'string' || proxy == '')
+		fail(400, 'group and proxy must be non-empty strings');
+	let c = clash('set ' + sq(group) + ' ' + sq(proxy));
+	if (c.rc == 3) fail(503, c.msg);
+	if (c.rc != 0) fail(502, c.msg || 'clash helper failed');
+	reply(200, { ok: true });
+}
+if (r0 == 'proxy' && r1 == 'ping' && PATH[2] == null) {
+	if (METHOD != 'POST') fail(405, 'method not allowed');
+	// Optional body {"proxy": name}; without it (or with {}) the 4G exit proxy is tested.
+	let args = 'ping';
+	let b = body();
+	if (b != null) {
+		if (type(b) != 'object' || (b.proxy != null && (type(b.proxy) != 'string' || b.proxy == '')))
+			fail(400, 'proxy must be a non-empty string');
+		if (type(b.proxy) == 'string') args += ' ' + sq(b.proxy);
+	}
+	let c = clash(args);
+	if (c.rc == 3) fail(503, c.msg);
+	if (c.rc != 0) fail(502, c.msg || 'clash helper failed');
+	reply(200, c.data);
+}
+if (r0 == 'proxy' && r1 == 'test' && PATH[2] == null) {
+	if (METHOD != 'POST') fail(405, 'method not allowed');
+	// Optional body {"group": name}; without it (or with {}) every listed group is tested.
+	let args = 'test';
+	let b = body();
+	if (b != null) {
+		if (type(b) != 'object' || (b.group != null && (type(b.group) != 'string' || b.group == '')))
+			fail(400, 'group must be a non-empty string');
+		if (type(b.group) == 'string') args += ' ' + sq(b.group);
+	}
+	let c = clash(args);
+	if (c.rc == 3) fail(503, c.msg);
+	if (c.rc == 4) fail(404, c.msg);
+	if (c.rc != 0) fail(502, c.msg || 'clash helper failed');
+	reply(200, c.data);
+}
+fail(404, 'not found');

@@ -1,0 +1,448 @@
+#!/usr/bin/env python3
+"""dongle-clash: Mihomo/Clash integration helper for the dongle API and the LuCI app.
+
+Detects the integrated mihomo/clash core (procd service or process), finds the
+4G exit proxy (first proxy in the running config bound to the dongle interface),
+lists the adjustable proxy groups that use it, and changes their selection.
+
+Usage:
+    dongle-clash status              # always exits 0
+    dongle-clash groups              # exit 3: not integrated / no exit proxy
+    dongle-clash set <group> <proxy> # exit 3: not integrated / no exit proxy
+    dongle-clash ping [proxy]        # delay-test the exit proxy (or a named one)
+    dongle-clash test [group]        # delay-test every member of every listed group, or of one group
+
+All output is JSON on stdout. Exit codes: 0 ok, 3 clash not usable, 4 group not found, 1 other error.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+try:
+    import ast
+except ImportError:
+    ast = None
+
+STATUS = "/tmp/dongle-web/status.json"
+CORE_RE = re.compile(r"^(clash|mihomo)([-_].*)?$")
+ADJUSTABLE = {"selector", "url-test", "fallback"}
+# Groups built into mihomo that mirror all proxies; users never manage them here.
+BUILTIN = {"GLOBAL"}
+
+_urllib = None
+
+
+def urllib():
+    """Import urllib lazily: python3-light nodes without clash never need it."""
+    global _urllib
+    if _urllib is None:
+        import socket
+        import _socket
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        # OpenWrt's python has no encodings.idna, and CPython's C getaddrinfo encodes
+        # str hosts with IDNA. Bytes hosts skip that path entirely.
+        def _getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            if isinstance(host, str):
+                host = host.encode("utf-8")
+            return _socket.getaddrinfo(host, port, family, type, proto, flags)
+
+        socket.getaddrinfo = _getaddrinfo
+        _urllib = (urllib.request, urllib.error, urllib.parse)
+    return _urllib
+
+
+class Fail(Exception):
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.code = code
+
+
+def out(obj):
+    print(json.dumps(obj, ensure_ascii=False))
+
+
+def fail(message, code=1):
+    out({"error": message})
+    sys.exit(code)
+
+
+def dongle_ifname():
+    try:
+        with open(STATUS) as f:
+            return json.load(f).get("usb0_dev") or None
+    except Exception:
+        return None
+
+
+def procd_core():
+    """Find the running mihomo/clash procd instance. Returns (pid, argv-string) or None."""
+    try:
+        services = json.loads(subprocess.run(
+            ["ubus", "call", "service", "list"], capture_output=True, text=True, timeout=10
+        ).stdout)
+    except Exception:
+        return None
+    for service in services.values():
+        for inst in (service.get("instances") or {}).values():
+            cmd = inst.get("command") or []
+            joined = " ".join(str(c) for c in cmd)
+            tokens = [t.strip('"') for t in joined.split()]
+            if any(CORE_RE.match(os.path.basename(t)) for t in tokens):
+                pid = inst.get("pid")
+                if inst.get("running") and pid:
+                    return pid, joined
+    return None
+
+
+def proc_core():
+    """Fallback: scan /proc for the core process. Returns (pid, argv-string) or None."""
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/cmdline", "rb") as f:
+                argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+        except OSError:
+            continue
+        if argv and any(CORE_RE.match(os.path.basename(a)) for a in argv):
+            return int(name), " ".join(argv)
+    return None
+
+
+def gid_of(pid):
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("Gid:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return None
+
+
+def config_path(argv):
+    m = re.search(r'(?:^|\s)-f\s+"([^"]+)"', argv) or re.search(r"(?:^|\s)-f\s+(\S+)", argv)
+    return m.group(1) if m else None
+
+
+def parse_scalar(raw):
+    """Decode a yaml scalar token (unquoted / single / double quoted) enough for names."""
+    s = raw.strip()
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        if ast is not None:
+            try:
+                return ast.literal_eval(s)
+            except Exception:
+                pass
+        return re.sub(r"\\[Uu]([0-9a-fA-F]{4,8})",
+                      lambda m: chr(int(m.group(1), 16)), s[1:-1])
+    if len(s) >= 2 and s[0] == "'" and s[-1] == "'":
+        return s[1:-1].replace("''", "'")
+    return s
+
+
+def interface_proxies(path, ifname):
+    """Ordered proxy names in the config's proxies: section bound to ifname.
+
+    The proxies section is a flat list of simple maps; stdlib-only parse.
+    """
+    names = []
+    section = False
+    current = None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not section:
+                    if line.rstrip("\n") == "proxies:":
+                        section = True
+                    continue
+                if re.match(r"^(?!- )\S[^:]*:", line):
+                    break
+                m = re.match(r"^-\s+(\S+):\s*(.*)$", line)
+                if m:
+                    if current:
+                        names.append(current)
+                    current = {}
+                    key, val = m.group(1), m.group(2)
+                    if key in ("name", "interface", "interface-name"):
+                        current[key] = parse_scalar(val)
+                    continue
+                m = re.match(r"^\s+([A-Za-z0-9_-]+):\s*(.*)$", line)
+                if m and current is not None and m.group(1) in ("interface", "interface-name"):
+                    current[m.group(1)] = parse_scalar(m.group(2))
+    except OSError:
+        return []
+    if current:
+        names.append(current)
+    return [p["name"] for p in names
+            if p.get("interface") == ifname or p.get("interface-name") == ifname]
+
+
+def controller_of(path):
+    """(host, port, secret) from the external-controller/secret lines, or None."""
+    host = port = None
+    secret = ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("external-controller:"):
+                    val = parse_scalar(line.split(":", 1)[1])
+                    if val.startswith("unix:"):
+                        return None
+                    host, _, p = val.rpartition(":")
+                    if not p.isdigit():
+                        return None
+                    host, port = host or "127.0.0.1", int(p)
+                elif line.startswith("secret:"):
+                    secret = parse_scalar(line.split(":", 1)[1])
+    except OSError:
+        return None
+    if host is None:
+        return None
+    if host in ("0.0.0.0", "::", ""):
+        host = "127.0.0.1"
+    return host, port, secret
+
+
+class Clash:
+    def __init__(self, host, port, secret):
+        urllib_request, _, urllib_parse = urllib()
+        self.parse = urllib_parse
+        self.request = urllib_request
+        self.base = f"http://{host}:{port}"
+        self.headers = {"Authorization": "Bearer " + secret}
+
+    def call(self, method, path, body=None, timeout=10):
+        headers = dict(self.headers)
+        data = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(body).encode()
+        req = self.request.Request(self.base + path, data=data, method=method, headers=headers)
+        try:
+            with self.request.urlopen(req, timeout=timeout) as r:
+                text = r.read().decode()
+                return r.status, json.loads(text) if text else {}
+        except self.error().HTTPError as e:
+            try:
+                msg = json.loads(e.read().decode()).get("message") or e.reason
+            except Exception:
+                msg = e.reason
+            raise Fail(f"clash: {msg}")
+        except (OSError, ValueError) as e:
+            raise Fail(f"clash unreachable: {e}")
+
+    @staticmethod
+    def error():
+        return urllib()[1]
+
+    def proxies(self):
+        return self.call("GET", "/proxies")[1].get("proxies") or {}
+
+    def match_target(self):
+        """The proxy-group name that the final Match (catch-all) rule routes to.
+
+        Returns None when the core has no Match rule or the rule list is
+        unavailable.  Only the Match rule is considered: the other rules name
+        groups too, but Match is the one that handles everything not matched
+        earlier, so its group is the one worth showing first.
+        """
+        try:
+            resp = self.call("GET", "/rules")[1]
+        except Fail:
+            return None
+        for r in resp.get("rules") or []:
+            if str(r.get("type", "")).lower() == "match" and r.get("proxy"):
+                return r["proxy"]
+        return None
+
+
+def integration():
+    """Detect the integrated clash: pid/gid, controller, exit proxy."""
+    info = {"integrated": False, "running": False, "pid": None, "gid": None,
+            "core": None, "version": None, "controller": None, "interface": None,
+            "exit": None, "error": None}
+    found = procd_core() or proc_core()
+    if not found:
+        return info, None, None
+    pid, argv = found
+    info["integrated"] = True
+    info["running"] = True
+    info["pid"] = pid
+    info["gid"] = gid_of(pid)
+    for t in argv.split():
+        base = os.path.basename(t.strip('"'))
+        m = CORE_RE.match(base)
+        if m:
+            info["core"] = m.group(1)
+            break
+    path = config_path(argv)
+    if not path:
+        return info, None, None
+    ctl = controller_of(path)
+    if not ctl:
+        return info, None, None
+    host, port, secret = ctl
+    info["controller"] = f"{host}:{port}"
+    ifname = dongle_ifname()
+    if not ifname:
+        return info, path, None
+    info["interface"] = ifname
+    candidates = interface_proxies(path, ifname)
+    if candidates:
+        info["exit"] = candidates[0]
+    try:
+        clash = Clash(host, port, secret)
+    except ImportError:
+        info["error"] = "python3 urllib module unavailable"
+        return info, path, None
+    try:
+        version = clash.call("GET", "/version")[1]
+        if isinstance(version, dict):
+            info["version"] = version.get("version")
+            # OpenClash runs Mihomo under the binary name "clash"; meta marks Mihomo.
+            if version.get("meta"):
+                info["core"] = "mihomo"
+    except Fail:
+        pass
+    return info, path, clash
+
+
+def require_clash():
+    info, path, clash = integration()
+    if not clash:
+        fail(info.get("error") or "clash not integrated", 3)
+    return info, clash
+
+
+def require_exit():
+    info, clash = require_clash()
+    if not info["exit"]:
+        fail("4G exit proxy not found (no proxy bound to the dongle interface)", 3)
+    return info, clash
+
+
+def member(proxies, name, now):
+    p = proxies.get(name) or {}
+    history = p.get("history") or []
+    delay = history[-1].get("delay") if history else None
+    return {"name": name, "type": str(p.get("type", "")).lower(),
+            "delay": delay, "selected": name == now}
+
+
+def exit_groups(clash, exit_name):
+    proxies = clash.proxies()
+    groups = []
+    for p in proxies.values():
+        if "all" not in p or str(p.get("type", "")).lower() not in ADJUSTABLE:
+            continue
+        if p.get("name") in BUILTIN:
+            continue
+        if exit_name not in p["all"]:
+            continue
+        now = p.get("now")
+        groups.append({"name": p.get("name"), "type": str(p.get("type", "")).lower(),
+                       "now": now,
+                       "proxies": [member(proxies, n, now) for n in p["all"]]})
+    # The group used by the Match (catch-all) rule goes first; the rest stay
+    # alphabetical.  Match carries the traffic no other rule claimed, so that
+    # group is the one the user reaches for most.
+    groups.sort(key=lambda g: g["name"])
+    match = clash.match_target()
+    if match:
+        groups.sort(key=lambda g: g["name"] != match)
+    return groups
+
+
+def cmd_status():
+    info, _, _ = integration()
+    out(info)
+
+
+def cmd_groups():
+    info, clash = require_exit()
+    out({"exit": info["exit"], "interface": info["interface"],
+         "server": {"core": info["core"], "version": info["version"]},
+         "groups": exit_groups(clash, info["exit"])})
+
+
+def cmd_set(group, proxy):
+    _, clash = require_exit()
+    quote = clash.parse.quote
+    _, body = clash.call("GET", "/proxies/" + quote(group, safe=""))
+    if not body:
+        fail(f"group not found: {group}")
+    if str(body.get("type", "")).lower() not in ADJUSTABLE:
+        fail(f"group type is not adjustable: {group} ({body.get('type')})")
+    if proxy not in (body.get("all") or []):
+        fail(f"proxy not in group {group}: {proxy}")
+    clash.call("PUT", "/proxies/" + quote(group, safe=""), {"name": proxy})
+    clash.call("PUT", "/configs", {"force": True})
+    out({"ok": True})
+
+
+def cmd_ping(name=None):
+    """Delay-test a proxy via mihomo (updates its history). Default: the 4G exit proxy."""
+    info, clash = require_exit()
+    target = name or info["exit"]
+    query = clash.parse.urlencode({"timeout": "8000",
+                                   "url": "http://www.gstatic.com/generate_204"})
+    _, body = clash.call("GET", "/proxies/" + clash.parse.quote(target, safe="") + "/delay?" + query,
+                         timeout=15)
+    delay = body.get("delay") if isinstance(body, dict) else None
+    if not isinstance(delay, int) or delay <= 0:
+        fail(f"delay unavailable for {target}")
+    out({"name": target, "delay": delay})
+
+
+def cmd_test(group=None):
+    """Delay-test every member of every listed group, or of one group (updates mihomo history)."""
+    info, clash = require_exit()
+    groups = exit_groups(clash, info["exit"])
+    if group is not None:
+        groups = [g for g in groups if g["name"] == group]
+        if not groups:
+            fail(f"group not found: {group}", 4)
+    query = clash.parse.urlencode({"timeout": "8000",
+                                   "url": "http://www.gstatic.com/generate_204"})
+    tested, failed = 0, 0
+    for g in groups:
+        try:
+            _, body = clash.call("GET", "/group/" + clash.parse.quote(g["name"], safe="") + "/delay?" + query,
+                                 timeout=15)
+            if isinstance(body, dict):
+                tested += sum(1 for d in body.values() if isinstance(d, int) and d > 0)
+        except Fail:
+            failed += 1
+    out({"ok": True, "groups": len(groups), "tested": tested, "failed_groups": failed})
+
+
+def main():
+    argv = sys.argv[1:]
+    try:
+        if argv == ["status"]:
+            cmd_status()
+        elif argv == ["groups"]:
+            cmd_groups()
+        elif len(argv) == 3 and argv[0] == "set":
+            cmd_set(argv[1], argv[2])
+        elif argv[:1] == ["test"] and len(argv) <= 2:
+            cmd_test(argv[1] if len(argv) == 2 else None)
+        elif argv[:1] == ["ping"] and len(argv) <= 2:
+            cmd_ping(argv[1] if len(argv) == 2 else None)
+        else:
+            fail("usage: dongle-clash status|groups|test [group]|set <group> <proxy>|ping [proxy]")
+    except Fail as e:
+        fail(str(e), e.code)
+    except BrokenPipeError:
+        pass
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+"""sim-anywhere-quota: data plan and daily limit for the 4G dongle (see ARCH.md, "Dongle Data Limit").
+
+UCI (/etc/config/dongle, section `quota`):
+    cycle_limit  '1' applies the cycle limit (plan); anything else does not
+    plan         cycle data, e.g. '620 GB'; a plain number is read as GB (legacy)
+    cycle_ratio  percent of plan at which the cycle limit blocks, 1-100 (default 100)
+    cycle_mode   'month' (each cycle starts on day 1), 'date' (reset_day each month)
+                 or 'days' (cycle_days from cycle_start); absent means 'date'
+    reset_day    day of the month the cycle resets, 1-28 (used when cycle_mode is 'date')
+    cycle_days   cycle length in days, 1-365 (used when cycle_mode is 'days')
+    cycle_start  first cycle start date YYYY-MM-DD, before today (used when cycle_mode is 'days')
+    daily_limit  '1' applies the daily limit (daily); anything else does not
+    daily        daily limit, e.g. '20 GB'; a plain number is read as MB (legacy)
+
+The two limits are independent. The service is idle (not running) when both limits are off:
+`sim-anywhere-quota idle` exits 0 then, and `sim-anywhere-quota release` sets the modem to attached.
+
+The service (procd `sim-anywhere-quota`, no arguments) runs always. Every second it adds the
+rx + tx growth of the uplink (usb0) to the cycle and to today, and it applies the block at
+once: `AT+CGATT=0` detaches from the packet domain, `AT+CGATT=1` attaches again. The modem
+is queried every RECONCILE_EVERY seconds, so a modem restart (CGATT returns to 1) is corrected.
+
+Files:
+    /var/run/dongle-quota.json       live state, rewritten every second (tmpfs)
+    /root/dongle-quota.json          persistent state, saved every SAVE_EVERY seconds and on each change
+    /var/run/dongle-quota.calibrate  request from `calibrate`, applied by the service within a second
+
+Usage:
+    sim-anywhere-quota                 run the service
+    sim-anywhere-quota status          JSON state, for the API and the LuCI settings page
+    sim-anywhere-quota calibrate MB    set the cycle usage to MB (the service applies it)
+"""
+
+import datetime
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+
+STATE = "/root/dongle-quota.json"
+LIVE = "/var/run/dongle-quota.json"
+REQUEST = "/var/run/dongle-quota.calibrate"
+STATUS = "/tmp/dongle-web/status.json"
+AT = "/usr/bin/dongle-at"
+MB = 1024 * 1024
+GB = 1024 * MB
+SIZE_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?B)?$", re.I)
+UNITS = {"B": 1, "KB": 1024, "MB": MB, "GB": GB, "TB": 1024 * GB}
+LEGACY_UNIT = {"plan": "GB", "daily": "MB"}
+SAMPLE = 1             # seconds between counter reads
+SAVE_EVERY = 60        # seconds between flash writes (a change of the block is saved at once)
+RECONCILE_EVERY = 60   # seconds between modem checks of CGATT (5 s while the modem does not answer)
+CONFIG_EVERY = 10      # seconds between uci reads
+
+
+def uci(name):
+    try:
+        out = subprocess.run(["uci", "-q", "get", "dongle.quota." + name],
+                             capture_output=True, text=True).stdout
+    except OSError:
+        return ""
+    return out.strip()
+
+
+def number(text, default=0.0):
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        return default
+
+
+def size(name):
+    """Bytes from a value with an optional unit; a plain number keeps its legacy unit."""
+    m = SIZE_RE.match(uci(name))
+    if not m:
+        return 0
+    unit = (m.group(2) or LEGACY_UNIT[name]).upper()
+    return int(float(m.group(1)) * UNITS[unit])
+
+
+def config():
+    reset = int(number(uci("reset_day"), 1))
+    ratio = int(number(uci("cycle_ratio"), 100))
+    mode = uci("cycle_mode")
+    days = int(number(uci("cycle_days"), 30))
+    return {
+        "mode": mode if mode in ("month", "date", "days") else "date",
+        "cycle_on": uci("cycle_limit") == "1",
+        "plan": size("plan"),
+        "ratio": min(100, max(1, ratio)),
+        "reset_day": min(28, max(1, reset)),
+        "days": min(365, max(1, days)),
+        "anchor": uci("cycle_start"),
+        "daily_on": uci("daily_limit") == "1",
+        "daily": size("daily"),
+    }
+
+
+def idle(c):
+    # nothing to enforce: both limits off
+    return not c["cycle_on"] and not c["daily_on"]
+
+
+def today():
+    t = time.localtime()
+    return t.tm_year, t.tm_mon, t.tm_mday
+
+
+def date_text(y, m, d):
+    return "%04d-%02d-%02d" % (y, m, d)
+
+
+def cycle_bounds(c):
+    # (start, next) of the cycle that contains today. 'days' counts cycles of cycle_days
+    # from cycle_start; a bad cycle_start falls back to the monthly 'date' rule.
+    y, m, d = today()
+    if c["mode"] == "days":
+        try:
+            anchor = datetime.date.fromisoformat(c["anchor"])
+        except (ValueError, TypeError):
+            anchor = None
+        if anchor is not None:
+            n = c["days"]
+            k = max(0, (datetime.date(y, m, d) - anchor).days // n)
+            start = anchor + datetime.timedelta(days=k * n)
+            return start.isoformat(), (start + datetime.timedelta(days=n)).isoformat()
+    reset = 1 if c["mode"] == "month" else c["reset_day"]
+    if d >= reset:
+        sy, sm = y, m
+    elif m == 1:
+        sy, sm = y - 1, 12
+    else:
+        sy, sm = y, m - 1
+    ny, nm = (sy + 1, 1) if sm == 12 else (sy, sm + 1)
+    return date_text(sy, sm, reset), date_text(ny, nm, reset)
+
+
+def load(path=STATE):
+    try:
+        with open(path) as f:
+            s = json.load(f)
+    except (OSError, ValueError):
+        s = {}
+    s.setdefault("cycle", "")
+    s.setdefault("used", 0)
+    s.setdefault("day", "")
+    s.setdefault("day_used", 0)
+    s.setdefault("rx", None)
+    s.setdefault("tx", None)
+    s.setdefault("block", "")
+    s.setdefault("attached", None)
+    return s
+
+
+def write(path, s):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(s, f)
+    os.replace(tmp, path)
+
+
+def uplink_dev():
+    try:
+        with open(STATUS) as f:
+            return json.load(f).get("usb0_dev") or "usb0"
+    except (OSError, ValueError):
+        return "usb0"
+
+
+def counters():
+    base = "/sys/class/net/%s/statistics/" % uplink_dev()
+    try:
+        with open(base + "rx_bytes") as f:
+            rx = int(f.read())
+        with open(base + "tx_bytes") as f:
+            tx = int(f.read())
+    except (OSError, ValueError):
+        return None
+    return rx, tx
+
+
+def count(s):
+    # growth since the last sample; a counter below its last value was reset (modem re-enumerated)
+    cur = counters()
+    if cur is None:
+        return
+    rx, tx = cur
+    if s["rx"] is not None and s["tx"] is not None:
+        delta = (rx - s["rx"] if rx >= s["rx"] else rx) + (tx - s["tx"] if tx >= s["tx"] else tx)
+        s["used"] += delta
+        s["day_used"] += delta
+    s["rx"], s["tx"] = rx, tx
+
+
+def roll(s, c):
+    start = cycle_bounds(c)[0]
+    if s["cycle"] != start:
+        s["cycle"], s["used"] = start, 0
+    day = date_text(*today())
+    if s["day"] != day:
+        s["day"], s["day_used"] = day, 0
+
+
+def decide(s, c):
+    if c["cycle_on"] and c["plan"] > 0 and s["used"] >= c["plan"] * c["ratio"] // 100:
+        return "limit"
+    if c["daily_on"] and c["daily"] > 0 and s["day_used"] >= c["daily"]:
+        return "daily"
+    return ""
+
+
+def at(command):
+    try:
+        r = subprocess.run([AT, "cmd", command, "5"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def reconcile(block):
+    # the modem's attach state, set to match the block; None when the modem does not answer
+    out = at("AT+CGATT?")
+    m = re.search(r"\+CGATT:\s*(\d)", out or "")
+    if not m:
+        return None
+    attached = m.group(1) == "1"
+    want = block == ""
+    if attached == want:
+        return attached
+    ok = at("AT+CGATT=%d" % int(want))
+    return want if ok is not None and re.search(r"^OK$", ok, re.M) else attached
+
+
+def take_request():
+    try:
+        with open(REQUEST) as f:
+            value = float(f.read())
+        os.remove(REQUEST)
+    except (OSError, ValueError):
+        return None
+    return int(max(0.0, value) * MB)
+
+
+def step(s, c, last, now):
+    # one sample: count, apply a calibration request, decide the block, and save what changed
+    count(s)
+    roll(s, c)
+    used = take_request()
+    if used is not None:
+        s["used"] = used
+    block = decide(s, c)
+    changed = block != s["block"]
+    s["block"] = block
+    if changed or now - last["reconcile"] >= RECONCILE_EVERY:
+        attached = reconcile(block)
+        last["reconcile"] = now if attached is not None else now - RECONCILE_EVERY + 5
+        if attached is not None:
+            s["attached"] = attached
+    write(LIVE, s)
+    if changed or used is not None or now - last["save"] >= SAVE_EVERY:
+        write(STATE, s)
+        last["save"] = now
+
+
+def serve():
+    s = load()
+    c = config()
+    last = {"save": 0, "reconcile": 0, "config": 0}
+    running = []
+    signal.signal(signal.SIGTERM, lambda *a: running.append(1))
+    while not running:
+        now = time.time()
+        if now - last["config"] >= CONFIG_EVERY:
+            c = config()
+            last["config"] = now
+        step(s, c, last, now)
+        time.sleep(SAMPLE)
+    write(STATE, s)
+
+
+def status():
+    # bytes; a limit of 0 means no limit
+    s = load(LIVE) if os.path.exists(LIVE) else load()
+    c = config()
+    nxt = cycle_bounds(c)[1]
+    return {
+        "cycle_on": c["cycle_on"],
+        "plan": c["plan"],
+        "ratio": c["ratio"],
+        "reset_day": c["reset_day"],
+        "cycle_mode": c["mode"],
+        "daily_on": c["daily_on"],
+        "daily": c["daily"],
+        "cycle": s["cycle"],
+        "next_reset": nxt,
+        "used": s["used"],
+        "day": s["day"],
+        "day_used": s["day_used"],
+        "block": s["block"],
+        "attached": s["attached"],
+    }
+
+
+def apply_calibration(value):
+    # no running service: write the state here. The counter baseline moves to now, so the
+    # traffic since the last save is not counted twice.
+    s = load()
+    roll(s, config())
+    cur = counters()
+    if cur is not None:
+        s["rx"], s["tx"] = cur
+    s["used"] = int(value * MB)
+    write(LIVE, s)
+    write(STATE, s)
+
+
+def calibrate(value):
+    if idle(config()):
+        apply_calibration(value)
+        return
+    tmp = REQUEST + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(str(value))
+    os.replace(tmp, REQUEST)
+    # wait until the service has written the live state: it removes the request before it
+    # saves the value, so the request file alone does not mean the value is visible yet
+    target = int(value * MB)
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        if not os.path.exists(REQUEST) and os.path.exists(LIVE) and abs(load(LIVE)["used"] - target) < 10 * MB:
+            return
+        time.sleep(0.2)
+    if os.path.exists(REQUEST):
+        os.remove(REQUEST)
+    apply_calibration(value)
+
+
+def release():
+    # run by the init script when the service is idle: attach the modem and clear a stale block
+    s = load()
+    s["block"] = decide(s, config())
+    attached = reconcile(s["block"])
+    if attached is not None:
+        s["attached"] = attached
+    write(STATE, s)
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "serve"
+    if cmd == "idle" and len(argv) == 2:
+        return 0 if idle(config()) else 1
+    if cmd == "release" and len(argv) == 2:
+        release()
+        return 0
+    if cmd == "serve" and len(argv) <= 2:
+        serve()
+        return 0
+    if cmd == "status" and len(argv) == 2:
+        print(json.dumps(status()))
+        return 0
+    if cmd == "calibrate" and len(argv) == 3:
+        try:
+            value = float(argv[2])
+        except ValueError:
+            value = -1
+        if value < 0:
+            print(json.dumps({"error": "bad value"}))
+            return 64
+        calibrate(value)
+        print(json.dumps(status()))
+        return 0
+    print("usage: sim-anywhere-quota | status | calibrate MB | idle | release", file=sys.stderr)
+    return 64
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

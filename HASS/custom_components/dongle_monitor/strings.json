@@ -1,0 +1,69 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to the SIM Anywhere node",
+        "description": "Enter the address of the node that runs the SIM Anywhere API.",
+        "data": {
+          "host": "Host or URL"
+        },
+        "data_description": {
+          "host": "For example openwrt.local."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the node.",
+      "unknown": "Unexpected response from the node."
+    },
+    "abort": {
+      "already_configured": "This node is already configured."
+    }
+  },
+  "device": {
+    "dongle": {
+      "name": "4G Dongle"
+    },
+    "sim": {
+      "name": "SIM card"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "dongle": {
+        "state": {
+          "online": "Online",
+          "absent": "Not found",
+          "link_down": "Link down",
+          "no_modem_data": "No modem data"
+        }
+      },
+      "sim": {
+        "state": {
+          "ready": "Ready",
+          "no_sim": "No SIM",
+          "locked": "Locked",
+          "unknown": "Unknown"
+        }
+      },
+      "rx": {
+        "name": "Downloaded"
+      },
+      "tx": {
+        "name": "Uploaded"
+      },
+      "rsrp": {
+        "name": "RSRP"
+      },
+      "rsrq": {
+        "name": "RSRQ"
+      },
+      "sinr": {
+        "name": "SINR"
+      },
+      "rssi": {
+        "name": "RSSI"
+      }
+    }
+  }
+}

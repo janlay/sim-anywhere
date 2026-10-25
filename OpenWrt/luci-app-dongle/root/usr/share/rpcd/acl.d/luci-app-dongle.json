@@ -1,0 +1,20 @@
+{
+	"luci-app-dongle": {
+		"description": "Node status, logs and settings of the SIM Anywhere services",
+		"read": {
+			"file": {
+				"/usr/bin/dongle-status": [ "exec" ],
+				"/usr/bin/dongle-clash": [ "exec" ],
+				"/usr/bin/dongle-announce": [ "exec" ],
+				"/usr/bin/sim-anywhere-quota": [ "exec" ]
+			},
+			"uci": [ "dongle" ]
+		},
+		"write": {
+			"ubus": {
+				"luci": [ "setInitAction" ]
+			},
+			"uci": [ "dongle" ]
+		}
+	}
+}
