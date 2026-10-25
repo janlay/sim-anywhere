@@ -1,5 +1,6 @@
 build/
 SIMAnywhere.xcodeproj/
+SIM Anywhere.xcodeproj/
 xcuserdata/
 .workbuddy-ai/
 /.env

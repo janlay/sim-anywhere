@@ -8,7 +8,8 @@ settings:
   base:
     SWIFT_VERSION: "6.0"
     MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    CURRENT_PROJECT_VERSION: "2"
+    SIM_ANYWHERE_GIT_SHORT_HASH: unknown
 targets:
   SIMAnywhere:
     type: application
@@ -28,6 +29,9 @@ targets:
     info:
       path: App/iOS/Info.plist
       properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        GitShortHash: $(SIM_ANYWHERE_GIT_SHORT_HASH)
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         BGTaskSchedulerPermittedIdentifiers:

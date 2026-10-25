@@ -177,7 +177,8 @@ struct SettingsView: View {
     private var appVersion: String {
         let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
-        return "\(short) (\(build))"
+        let revision = Bundle.main.object(forInfoDictionaryKey: "GitShortHash") as? String ?? ""
+        return "\(short) (\(build))" + (revision.isEmpty || revision == "unknown" ? "" : " · \(revision)")
     }
 
     /// True when the form differs from the stored address.
