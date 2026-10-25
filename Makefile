@@ -1,6 +1,6 @@
 PROJECT := SIM Anywhere.xcodeproj
 SCHEME := SIMAnywhere
-BUNDLE_ID := net.janlay.SIMAnywhere
+BUNDLE_ID := net.janlay.simanywhere
 TEAM_ID ?= 28466ZMF85
 DEBUG_DESTINATION ?= generic/platform=iOS Simulator
 DEBUG_SIGNING ?= NO

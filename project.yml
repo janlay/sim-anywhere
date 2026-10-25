@@ -7,8 +7,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "2"
+    MARKETING_VERSION: "1.1"
+    CURRENT_PROJECT_VERSION: "5"
     SIM_ANYWHERE_GIT_SHORT_HASH: unknown
 targets:
   SIMAnywhere:
@@ -17,7 +17,7 @@ targets:
     sources: [App/Shared, App/iOS]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: net.janlay.SIMAnywhere
+        PRODUCT_BUNDLE_IDENTIFIER: net.janlay.simanywhere
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES
@@ -25,7 +25,7 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: 访问局域网内 OpenWrt 节点上的 SIM Anywhere API。
         INFOPLIST_KEY_NSMicrophoneUsageDescription: 通话时把你的声音经 4G 模组传给对方。
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
     info:
       path: App/iOS/Info.plist
       properties:

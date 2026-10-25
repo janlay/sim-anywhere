@@ -1,1 +1,1 @@
-Please verify node connectivity, text messaging, and incoming calls.
+Feature: Display the SIM phone number in masked form.
