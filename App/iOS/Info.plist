@@ -4,7 +4,7 @@
 <dict>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>net.janlay.SIMAnywhere.smscheck</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).smscheck</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>

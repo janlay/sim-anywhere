@@ -8,6 +8,9 @@
 //   PATCH  /sms[/{id}] {read,ids}   mark read / unread
 //   DELETE /sms[/{id}][?ids=]       delete from the archive
 //   GET    /calls                   call log (written by sim-anywhere-calld; calls use ws://<host>:8765/call)
+//   POST   /push/register           register this device's VoIP push token
+//   DELETE /push/register           remove this device's token
+//   GET    /push/status             configuration and last APNs acceptance for this device
 //   DELETE /calls?ids=              delete call log entries
 //   POST   /at {command,timeout}    send one AT command to the modem, return its response lines
 //   GET    /proxy/status            clash integration status, PID/GID and the 4G exit proxy
@@ -29,6 +32,8 @@ const HIST = '/root/dongle-history.csv';
 const SMS = '/root/dongle-sms.tsv';
 const CALLS = '/root/dongle-calls.tsv';
 const CALLS_LOCK = '/var/lock/dongle-calls.lock';
+const PUSH_TOKENS = '/root/sim-anywhere-voip-tokens.json';
+const PUSH_LOCK = '/var/lock/sim-anywhere-voip-tokens.lock';
 const LOCK = '/var/lock/sim-anywhere-detection.lock';
 const SPEC = '/sim-anywhere/openapi.json';
 const PRESENT_HELPER = '/usr/bin/dongle-present';
@@ -89,6 +94,29 @@ function body() {
 	let n = int(getenv('CONTENT_LENGTH') || 0);
 	let b = n > 0 ? json(fs.stdin.read(n) || 'null') : null;
 	return type(b) == 'object' ? b : {};
+}
+
+function push_register() {
+	if (METHOD != 'POST' && METHOD != 'DELETE') fail(405, 'method not allowed');
+	let b = body();
+	if (type(b.device) != 'string' || !match(b.device, /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/))
+		fail(400, 'invalid device id');
+	if (METHOD == 'POST' && (type(b.token) != 'string' || length(b.token) < 32 || length(b.token) > 256 || !match(b.token, /^[0-9a-f]+$/)
+		|| (b.environment != 'development' && b.environment != 'production')))
+		fail(400, 'invalid VoIP token');
+	let lock = fs.open(PUSH_LOCK, 'w');
+	lock.lock('x');
+	let devices = json(fs.readfile(PUSH_TOKENS) || '[]');
+	devices = filter(devices, d => d.device != b.device);
+	if (METHOD == 'POST') {
+		if (length(devices) >= 8) { lock.close(); fail(503, 'device limit reached'); }
+		push(devices, { device: b.device, token: b.token, environment: b.environment });
+	}
+	fs.writefile(PUSH_TOKENS + '.tmp', sprintf('%J', devices));
+	fs.chmod(PUSH_TOKENS + '.tmp', 0o600);
+	fs.rename(PUSH_TOKENS + '.tmp', PUSH_TOKENS);
+	lock.close();
+	reply(200, { ok: true });
 }
 
 /* ---------- UTF-8 ---------- */
@@ -398,11 +426,26 @@ function status_stream(seconds) {
 let r0 = PATH[0] ?? '', r1 = PATH[1];
 if (r0 == '') {
 	if (METHOD != 'GET') fail(405, 'method not allowed');
-	reply(200, { name: 'SIM Anywhere API', spec: SPEC, endpoints: ['status', 'history', 'sms', 'sms/sync', 'calls', 'at', 'quota', 'proxy/status', 'proxy/groups', 'proxy/select', 'proxy/ping', 'proxy/test', 'discovery/hello'] });
+	reply(200, { name: 'SIM Anywhere API', spec: SPEC, endpoints: ['status', 'history', 'sms', 'sms/sync', 'calls', 'at', 'quota', 'push/register', 'push/status', 'proxy/status', 'proxy/groups', 'proxy/select', 'proxy/ping', 'proxy/test', 'discovery/hello'] });
 }
 if (r0 == 'status' && r1 == null) {
 	if (METHOD != 'GET') fail(405, 'method not allowed');
 	status_stream(int(Q.seconds ?? 3600));
+}
+if (r0 == 'push' && r1 == 'register' && PATH[2] == null) push_register();
+if (r0 == 'push' && r1 == 'status' && PATH[2] == null) {
+	if (METHOD != 'GET') fail(405, 'method not allowed');
+	let device = Q.device ?? '', bundle = Q.bundle_id ?? '', environment = Q.environment ?? '';
+	if (!match(device, /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/)
+		|| !match(bundle, /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/)
+		|| (environment != 'development' && environment != 'production'))
+		fail(400, 'invalid VoIP status query');
+	let p = fs.popen('/usr/bin/sim-anywhere-push status ' + sq(device) + ' ' + sq(bundle) + ' ' + sq(environment));
+	let out = trim(p.read('all') || ''), rc = p.close(), state = null;
+	try { state = json(out); } catch (e) {}
+	if (rc != 0 || type(state) != 'object' || !match(state.state ?? '', /^(active|ineffective|unconfigured)$/))
+		fail(502, 'VoIP status helper failed');
+	reply(200, state);
 }
 // Everything below needs the modem. /status above and the index stay reachable so a client
 // can see why (present: 0) instead of a bare failure.

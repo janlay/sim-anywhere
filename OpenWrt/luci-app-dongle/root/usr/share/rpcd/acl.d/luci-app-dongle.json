@@ -11,8 +11,13 @@
 			"uci": [ "dongle" ]
 		},
 		"write": {
+			"file": {
+				"/etc/sim-anywhere-apns-key.p8.pending": [ "write" ],
+				"/usr/bin/sim-anywhere-push-key": [ "exec" ]
+			},
 			"ubus": {
-				"luci": [ "setInitAction" ]
+				"luci": [ "setInitAction" ],
+				"file": [ "write", "exec" ]
 			},
 			"uci": [ "dongle" ]
 		}

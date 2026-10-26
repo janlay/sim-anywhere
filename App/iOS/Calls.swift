@@ -18,6 +18,7 @@ private struct CallEvent: Decodable {
     var error: String?
     var path: String?
     var wifi: String?
+    var call_id: String?
 }
 
 @MainActor @Observable
@@ -39,6 +40,7 @@ final class CallSession: NSObject {
     var path: String?
     /// Wi-Fi Calling registration on the node: registered, connecting, error or off. Nil from a node without Wi-Fi Calling.
     var wifi: String?
+    var voipStatus: VoIPStatus = .ineffective
     /// Counts ended calls, so views can reload the call log.
     var ended = 0
     private(set) var muted = false
@@ -49,6 +51,10 @@ final class CallSession: NSObject {
     private var url: URL?
     private var active = false
     private var want = false
+    private var awaitingPush: UUID?
+    private var pendingDecline: UUID?
+    private var declineSent = false
+    private var callID: String?
     private var task: URLSessionWebSocketTask?
     private var loop: Task<Void, Never>?
     private let audio = CallAudio()
@@ -61,6 +67,7 @@ final class CallSession: NSObject {
     private var sessionActive = false
     /// The local user ended the call (CallKit already knows).
     private var endedHere = false
+    private var push: VoIPPushRegistry?
 
     override init() {
         let config = CXProviderConfiguration()
@@ -72,13 +79,16 @@ final class CallSession: NSObject {
         provider = CXProvider(configuration: config)
         super.init()
         provider.setDelegate(self, queue: .main)
+        push = VoIPPushRegistry(calls: self)
     }
 
     /// Keeps the WebSocket open while the app is in the foreground or a call is in progress.
     func update(host: String, active: Bool) {
+        push?.sync(host: host)
         let u = DongleAPI(host: host)?.callURL
+        if u != url { voipStatus = .ineffective }
         self.active = active
-        want = active || inCall
+        want = active || inCall || awaitingPush != nil || pendingDecline != nil
         if u != url {
             url = u
             task?.cancel(with: .goingAway, reason: nil)
@@ -88,6 +98,18 @@ final class CallSession: NSObject {
         } else if loop == nil {
             loop = Task { await run() }
         }
+    }
+
+    func refreshVoIPStatus(host: String) async {
+        guard let api = DongleAPI(host: host), let push,
+              let bundleID = Bundle.main.bundleIdentifier else {
+            voipStatus = .ineffective
+            return
+        }
+        let status = (try? await api.voipStatus(device: push.statusDeviceID,
+                                               bundleID: bundleID,
+                                               environment: push.statusEnvironment)) ?? .ineffective
+        if api.callURL == url { voipStatus = status }
     }
 
     private func run() async {
@@ -108,7 +130,9 @@ final class CallSession: NSObject {
             connected = false
             ready = false
             wifi = nil
-            if inCall || uuid != nil { apply(CallEvent(type: "state", state: "idle", reason: "连接中断")) }
+            if (inCall || uuid != nil) && awaitingPush == nil && pendingDecline == nil {
+                apply(CallEvent(type: "state", state: "idle", reason: "连接中断"))
+            }
             if want { try? await Task.sleep(for: .seconds(3)) }
         }
         loop = nil
@@ -126,12 +150,40 @@ final class CallSession: NSObject {
             connected = true
             ready = e.ready ?? false
             wifi = e.wifi
+            if let pendingDecline {
+                if e.call_id == pendingDecline.uuidString.lowercased(), e.state == "incoming" {
+                    if !declineSent {
+                        declineSent = send(["op": "hangup", "call_id": pendingDecline.uuidString.lowercased()])
+                    }
+                    return
+                }
+                self.pendingDecline = nil
+                self.awaitingPush = nil
+                declineSent = false
+                if e.state == "idle" {
+                    want = active
+                    if !want { task?.cancel(with: .goingAway, reason: nil) }
+                    return
+                }
+            }
+            if let awaitingPush {
+                if e.call_id != awaitingPush.uuidString.lowercased() || e.state != "incoming" {
+                    self.awaitingPush = nil
+                    apply(CallEvent(type: "state", state: "idle", reason: "来电已结束"))
+                    return
+                }
+                self.awaitingPush = nil
+            }
             apply(e)
         }
     }
 
     private func apply(_ e: CallEvent) {
         let was = state
+        if e.state == "incoming", let uuid, let nextID = e.call_id.flatMap(UUID.init(uuidString:)), uuid != nextID {
+            provider.reportCall(with: uuid, endedAt: nil, reason: .remoteEnded)
+            self.uuid = nil
+        }
         state = e.state ?? "idle"
         incoming = e.dir == "in"
         number = e.number
@@ -139,6 +191,7 @@ final class CallSession: NSObject {
         owner = e.owner ?? false
         reason = e.reason
         path = e.path
+        callID = e.call_id
         report(was)
         updateAudio()
         if state == "idle" && was != "idle" {
@@ -154,7 +207,7 @@ final class CallSession: NSObject {
     /// Tells CallKit about node state changes.
     private func report(_ was: String) {
         if state == "incoming" && uuid == nil {
-            let id = UUID()
+            let id = eCallID ?? UUID()
             uuid = id
             endedHere = false
             provider.reportNewIncomingCall(with: id, update: callUpdate()) { [weak self] error in
@@ -164,6 +217,9 @@ final class CallSession: NSObject {
             return
         }
         guard let uuid else { return }
+        if state == "incoming" && was == "incoming" {
+            provider.reportCall(with: uuid, updated: callUpdate())
+        }
         if state == "idle" {
             if !endedHere {
                 let r: CXCallEndedReason = switch reason {
@@ -181,6 +237,54 @@ final class CallSession: NSObject {
             provider.reportOutgoingCall(with: uuid, connectedAt: activeSince)
         } else if state == "dialing" || state == "alerting" {
             provider.reportCall(with: uuid, updated: callUpdate())
+        }
+    }
+
+    private var eCallID: UUID? { callID.flatMap(UUID.init(uuidString:)) }
+
+    func receiveVoIPPush(id: UUID, completion: @escaping () -> Void) {
+        if uuid == id { completion(); return }
+        nonisolated(unsafe) let done = completion
+        guard uuid == nil else {
+            provider.reportNewIncomingCall(with: id, update: callUpdate()) { [weak self] error in
+                done()
+                if error == nil {
+                    Task { @MainActor in self?.provider.reportCall(with: id, endedAt: nil, reason: .failed) }
+                }
+            }
+            return
+        }
+        uuid = id
+        awaitingPush = id
+        state = "incoming"
+        incoming = true
+        number = nil
+        endedHere = false
+        provider.reportNewIncomingCall(with: id, update: callUpdate()) { [weak self] error in
+            done()
+            if let error {
+                Task { @MainActor in
+                    guard self?.uuid == id else { return }
+                    self?.error = error.localizedDescription
+                    self?.uuid = nil
+                    self?.awaitingPush = nil
+                    self?.state = "idle"
+                    self?.incoming = false
+                }
+            }
+        }
+        update(host: UserDefaults.standard.string(forKey: "host") ?? "", active: active)
+        Task {
+            try? await Task.sleep(for: .seconds(30))
+            guard awaitingPush == id else { return }
+            provider.reportCall(with: id, endedAt: nil, reason: .failed)
+            uuid = nil
+            awaitingPush = nil
+            pendingDecline = nil
+            declineSent = false
+            state = "idle"
+            want = active
+            if !want { task?.cancel(with: .goingAway, reason: nil) }
         }
     }
 
@@ -244,6 +348,20 @@ final class CallSession: NSObject {
         return false
     }
 
+    func prepareMicrophone() async {
+        _ = await AVAudioApplication.requestRecordPermission()
+    }
+
+    private func waitForIncoming(_ id: UUID) async -> Bool {
+        for _ in 0..<150 {
+            if connected, state == "incoming", uuid == id,
+               callID == nil || callID == id.uuidString.lowercased() { return true }
+            if uuid != id || state == "idle" { return false }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return false
+    }
+
     @discardableResult
     private func send(_ m: [String: String]) -> Bool {
         guard let task, connected, let d = try? JSONEncoder().encode(m) else {
@@ -275,7 +393,10 @@ extension CallSession: @preconcurrency CXProviderDelegate {
 
     func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         Task {
-            guard await microphone(), send(["op": "answer"]) else { return action.fail() }
+            guard await waitForIncoming(action.callUUID), await microphone() else { return action.fail() }
+            var message = ["op": "answer"]
+            if let callID { message["call_id"] = callID }
+            guard send(message) else { return action.fail() }
             CallAudio.configure()
             action.fulfill()
         }
@@ -283,7 +404,17 @@ extension CallSession: @preconcurrency CXProviderDelegate {
 
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
         endedHere = true
-        send(["op": "hangup"])
+        if awaitingPush == action.callUUID, !connected {
+            pendingDecline = action.callUUID
+            declineSent = false
+            state = "idle"
+            incoming = false
+            uuid = nil
+        } else {
+            var message = ["op": "hangup"]
+            if let callID { message["call_id"] = callID }
+            send(message)
+        }
         action.fulfill()
     }
 

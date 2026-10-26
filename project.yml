@@ -10,14 +10,20 @@ settings:
     MARKETING_VERSION: "1.1"
     CURRENT_PROJECT_VERSION: "5"
     SIM_ANYWHERE_GIT_SHORT_HASH: unknown
+    SIM_ANYWHERE_BUNDLE_ID: net.janlay.simanywhere
 targets:
   SIMAnywhere:
     type: application
     platform: iOS
     sources: [App/Shared, App/iOS]
+    entitlements:
+      path: App/iOS/SIMAnywhere.entitlements
+      properties:
+        aps-environment: $(APS_ENVIRONMENT)
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: net.janlay.simanywhere
+        PRODUCT_BUNDLE_IDENTIFIER: $(SIM_ANYWHERE_BUNDLE_ID)
+        APS_ENVIRONMENT: development
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES
@@ -26,6 +32,9 @@ targets:
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: 访问局域网内 OpenWrt 节点上的 SIM Anywhere API。
         INFOPLIST_KEY_NSMicrophoneUsageDescription: 通话时把你的声音经 4G 模组传给对方。
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+      configs:
+        Release:
+          APS_ENVIRONMENT: production
     info:
       path: App/iOS/Info.plist
       properties:
@@ -35,7 +44,7 @@ targets:
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         BGTaskSchedulerPermittedIdentifiers:
-          - net.janlay.SIMAnywhere.smscheck
+          - $(PRODUCT_BUNDLE_IDENTIFIER).smscheck
         UIBackgroundModes:
           - fetch
           - audio

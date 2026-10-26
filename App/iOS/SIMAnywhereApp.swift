@@ -36,6 +36,7 @@ struct SIMAnywhereApp: App {
             .fullScreenCover(isPresented: .init(get: { phone.inCall }, set: { _ in })) { CallScreen().environment(phone) }
             // Poll every minute. Keeps the unread badge and new-SMS notifications current.
             .task(id: store.host) {
+                if !store.host.isEmpty, scenePhase == .active { await phone.prepareMicrophone() }
                 while !Task.isCancelled {
                     await store.refreshSMS()
                     try? await Task.sleep(for: .seconds(60))
@@ -43,8 +44,9 @@ struct SIMAnywhereApp: App {
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background { SMSWatch.schedule() }
+                if phase == .active, !store.host.isEmpty { Task { await phone.prepareMicrophone() } }
             }
-            // Incoming calls ring only while the call WebSocket is open: in the foreground, or during a call.
+            // A VoIP push reopens the call WebSocket while the app is in the background.
             .onChange(of: [store.host, "\(scenePhase)"], initial: true) {
                 phone.update(host: store.host, active: scenePhase != .background)
             }

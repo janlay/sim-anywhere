@@ -618,6 +618,55 @@
     }
    }
   },
+  "/push/register": {
+   "post": {
+    "tags": ["Calls"],
+    "summary": "Register a device for incoming VoIP call pushes",
+    "operationId": "registerVoIPDevice",
+    "description": "Stores one VoIP token per stable device id. The token is never returned by the API. At most eight devices can be registered. This endpoint uses the same trusted-LAN access model as the rest of the API.",
+    "requestBody": {
+     "required": true,
+     "content": { "application/json": { "schema": {
+      "type": "object", "required": ["device", "token", "environment"],
+      "properties": {
+       "device": { "type": "string", "format": "uuid" },
+       "token": { "type": "string", "pattern": "^[0-9a-f]{32,256}$" },
+       "environment": { "type": "string", "enum": ["development", "production"] }
+      }
+     } } }
+    },
+    "responses": { "200": { "description": "Registration saved" }, "400": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" } }
+   },
+   "delete": {
+    "tags": ["Calls"], "summary": "Remove a device's VoIP token", "operationId": "unregisterVoIPDevice",
+    "requestBody": { "required": true, "content": { "application/json": { "schema": {
+     "type": "object", "required": ["device"], "properties": { "device": { "type": "string", "format": "uuid" } }
+    } } } },
+    "responses": { "200": { "description": "Registration removed" }, "400": { "$ref": "#/components/responses/Error" } }
+   }
+  },
+  "/push/status": {
+   "get": {
+    "tags": ["Calls"],
+    "summary": "Check VoIP push readiness for one app device",
+    "operationId": "getVoIPStatus",
+    "description": "Returns unconfigured when APNs identifiers or key are missing. Returns ineffective when the key cannot sign, the app Bundle ID does not match, the device token is absent, or APNs has not accepted a real incoming-call push for the current configuration and token. Active means APNs accepted the most recent real push for this device; it does not guarantee delivery to the phone. No key or token is returned.",
+    "parameters": [
+     { "name": "device", "in": "query", "required": true, "schema": { "type": "string", "format": "uuid" } },
+     { "name": "bundle_id", "in": "query", "required": true, "schema": { "type": "string" } },
+     { "name": "environment", "in": "query", "required": true, "schema": { "type": "string", "enum": ["development", "production"] } }
+    ],
+    "responses": {
+     "200": { "description": "VoIP status", "content": { "application/json": { "schema": {
+      "type": "object", "required": ["state"], "properties": {
+       "state": { "type": "string", "enum": ["active", "ineffective", "unconfigured"] }
+      }
+     } } } },
+     "400": { "$ref": "#/components/responses/Error" },
+     "502": { "$ref": "#/components/responses/Error" }
+    }
+   }
+  },
   "/calls": {
    "get": {
     "tags": [
@@ -1371,6 +1420,11 @@
     "properties": {
      "type": {
       "const": "state"
+     },
+     "call_id": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "Stable for this call; also sent in its VoIP push. Null while idle."
      },
      "ready": {
       "type": "boolean",

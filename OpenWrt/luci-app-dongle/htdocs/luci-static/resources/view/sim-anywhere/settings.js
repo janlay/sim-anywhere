@@ -259,7 +259,8 @@ return view.extend({
 			uci.load('dongle'),
 			fs.exec_direct('/usr/bin/dongle-status', [ 'gid' ]),
 			fs.exec_direct('/usr/bin/dongle-announce', [ 'status' ]).catch(function() { return 'null'; }),
-			fs.exec_direct('/usr/bin/sim-anywhere-quota', [ 'status' ]).catch(function() { return 'null'; })
+			fs.exec_direct('/usr/bin/sim-anywhere-quota', [ 'status' ]).catch(function() { return 'null'; }),
+			fs.exec_direct('/usr/bin/sim-anywhere-push-key', [ 'status' ]).catch(function() { return 'missing'; })
 		]);
 	},
 
@@ -279,6 +280,56 @@ return view.extend({
 		o.datatype = 'range(1,65535)';
 		o.placeholder = String(data[1]).trim();
 		o.rmempty = true;
+
+		s = m.section(form.NamedSection, 'push', 'push', _('来电推送（APNs）'),
+			_('仅适用于使用自己的 Apple 开发团队签名构建的 App。节点在来电时直连 Apple APNs。请先在 Apple Developer 开启 Push Notifications，再保存以下标识并上传对应的 APNs .p8 密钥。'));
+
+		o = s.option(form.Value, 'team_id', _('Team ID'), _('Apple Developer 团队的 10 位标识。'));
+		o.rmempty = true;
+		o.validate = function(section_id, value) {
+			return !value || /^[A-Z0-9]{10}$/.test(value) || _('请输入 10 位大写字母或数字');
+		};
+
+		o = s.option(form.Value, 'key_id', _('Key ID'), _('与下方 APNs .p8 密钥对应的 10 位标识。'));
+		o.rmempty = true;
+		o.validate = function(section_id, value) {
+			return !value || /^[A-Z0-9]{10}$/.test(value) || _('请输入 10 位大写字母或数字');
+		};
+
+		o = s.option(form.Value, 'bundle_id', _('Bundle ID'), _('必须与用户自行签名构建的 iOS App 完全一致；VoIP 主题会自动添加 .voip。'));
+		o.rmempty = true;
+		o.validate = function(section_id, value) {
+			return !value || /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(value) || _('请输入有效的 Bundle ID');
+		};
+
+		o = s.option(form.DummyValue, '_apns_key', _('APNs 私钥'),
+			_('选择 Apple Developer 下载的 .p8 文件。密钥仅上传至本节点的 root 专用文件，不会回显。请通过可信的本地网络或 HTTPS 打开 LuCI。'));
+		o.renderWidget = function() {
+			var input = E('input', { 'type': 'file', 'accept': '.p8', 'style': 'max-width:260px' });
+			var button = E('button', { 'type': 'button', 'class': 'cbi-button cbi-button-apply',
+				'click': function() {
+					var file = input.files && input.files[0];
+					if (!file || file.size > 16384) {
+						ui.addNotification(null, E('p', _('请选择不超过 16 KB 的 APNs .p8 文件。')), 'error');
+						return;
+					}
+					return file.text().then(function(contents) {
+						return fs.exec_direct('/usr/bin/sim-anywhere-push-key', [ 'prepare' ])
+							.then(function() { return fs.write('/etc/sim-anywhere-apns-key.p8.pending', contents, 384); })
+							.then(function() { return fs.exec_direct('/usr/bin/sim-anywhere-push-key', [ 'activate' ]); });
+					}).then(function() {
+						ui.addNotification(null, E('p', _('APNs 密钥已保存。')), 'info');
+						window.location.reload();
+					}, function() {
+						ui.addNotification(null, E('p', _('密钥保存失败。请检查 .p8 文件。')), 'error');
+					});
+				}
+			}, _('上传密钥'));
+			return E('div', {}, [
+				E('div', {}, String(data[4]).trim() == 'configured' ? _('已配置') : _('未配置')),
+				E('div', { 'style': 'display:flex;gap:8px;align-items:center;margin-top:6px' }, [ input, button ])
+			]);
+		};
 
 		s = m.section(form.NamedSection, 'quota', 'quota', _('流量控制'),
 			_('用量达到套餐流量的设定比例或每日上限时断开移动数据。注意断开后 Wi-Fi Calling 将不可用。'));

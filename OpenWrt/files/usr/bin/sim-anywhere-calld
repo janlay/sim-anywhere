@@ -38,6 +38,14 @@ def now():
     return int(time.time())
 
 
+def call_uuid():
+    raw = bytearray(os.urandom(16))
+    raw[6] = (raw[6] & 0x0f) | 0x40
+    raw[8] = (raw[8] & 0x3f) | 0x80
+    text = raw.hex()
+    return f'{text[:8]}-{text[8:12]}-{text[12:16]}-{text[16:20]}-{text[20:]}'
+
+
 # ---------- modem AT port ----------
 class Modem:
     def __init__(self):
@@ -258,6 +266,8 @@ class Call:
 
     def reset(self):
         self.state, self.dir, self.number = 'idle', None, None
+        self.call_id = None
+        self.pushed = False
         self.since = self.active_since = None
         self.owner = None
         self.grace = 0
@@ -267,6 +277,7 @@ class Call:
 
     def view(self, c):
         return {'type': 'state', 'ready': modem.ready() or wifi.registered(), 'state': self.state, 'dir': self.dir,
+                'call_id': self.call_id,
                 'number': self.number, 'since': self.since, 'active_since': self.active_since,
                 'owner': c is not None and c is self.owner, 'reason': self.reason,
                 'path': 'wifi' if self.wifi or (self.state == 'idle' and wifi.registered()) else 'modem',
@@ -275,6 +286,13 @@ class Call:
     def notify(self):
         for c in list(clients):
             c.text(self.view(c))
+        if self.state == 'incoming' and self.call_id and not self.pushed:
+            self.pushed = True
+            try:
+                subprocess.Popen(['/usr/bin/sim-anywhere-push', self.call_id],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError as e:
+                log('VoIP push unavailable', e)
 
     def poll(self):
         self.next_poll = time.time() + (1 if self.state != 'idle' else 10)
@@ -316,6 +334,7 @@ class Call:
         st, changed = STATE.get(stat, 'active'), False
         if self.state == 'idle':
             self.dir, self.since, self.reason = ('in' if d == 1 else 'out'), now(), None
+            self.call_id = call_uuid()
             self.number = number or self.number
             changed = True
         if number and number != self.number:
@@ -379,6 +398,7 @@ class Call:
             return c.error('modem not ready')
         if o == 'dial':
             self.state, self.dir, self.number, self.since, self.owner, self.reason = 'dialing', 'out', n, now(), c, None
+            self.call_id = call_uuid()
             self.grace = time.time() + 5
             self.notify()
             modem.cmd('AT+QPCMV=1,2', lambda l, r: log('qpcmv before dial', r))
@@ -386,6 +406,8 @@ class Call:
         elif o == 'answer':
             if self.state != 'incoming':
                 return c.error('no incoming call')
+            if m.get('call_id') and m['call_id'] != self.call_id:
+                return c.error('call changed')
             self.owner = c
             modem.cmd('AT+QPCMV=1,2', lambda l, r: log('qpcmv before answer', r))
             modem.cmd('ATA', lambda l, r: r == 'OK' or self.failed(c, r), 30)
@@ -393,6 +415,8 @@ class Call:
         elif o == 'hangup':
             if self.state == 'idle':
                 return c.error('no call')
+            if m.get('call_id') and m['call_id'] != self.call_id:
+                return c.error('call changed')
             self.reason = 'hangup'
             modem.cmd('AT+CHUP', lambda l, r: r == 'OK' or modem.cmd('ATH'))
             self.poll()
@@ -438,15 +462,20 @@ class Call:
     def wifi_op(self, c, o, n, m):
         if o == 'dial':
             self.state, self.dir, self.number, self.since, self.owner, self.reason = 'dialing', 'out', n, now(), c, None
+            self.call_id = call_uuid()
             self.wifi = True
             self.notify()
             wifi.op({'op': 'dial', 'number': n})
         elif o == 'answer':
             if self.state != 'incoming':
                 return c.error('no incoming call')
+            if m.get('call_id') and m['call_id'] != self.call_id:
+                return c.error('call changed')
             self.owner = c
             wifi.op({'op': 'answer'})
         elif o == 'hangup':
+            if m.get('call_id') and m['call_id'] != self.call_id:
+                return c.error('call changed')
             self.reason = 'hangup'
             wifi.op({'op': 'hangup'})
         elif o == 'dtmf':
@@ -485,6 +514,7 @@ class Call:
             if self.state != 'idle':                    # a modem call is in progress
                 return wifi.op({'op': 'hangup'})
             self.wifi, self.since, self.reason = True, now(), None
+            self.call_id = call_uuid()
         self.wifi_seen = True
         self.dir, self.number = m.get('dir') or self.dir, m.get('number') or self.number
         if st != self.state:

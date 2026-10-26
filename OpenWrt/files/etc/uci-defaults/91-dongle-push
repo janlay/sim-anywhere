@@ -1,0 +1,7 @@
+#!/bin/sh
+# A named section must exist before the LuCI settings page can edit it.
+uci -q get dongle.push >/dev/null || {
+	uci set dongle.push=push
+	uci commit dongle
+}
+exit 0

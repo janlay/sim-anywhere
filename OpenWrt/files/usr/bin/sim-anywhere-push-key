@@ -1,0 +1,59 @@
+#!/usr/bin/python3
+"""Install an APNs signing key from LuCI without exposing its contents."""
+
+import os
+import stat
+import sys
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+KEY = "/etc/sim-anywhere-apns-key.p8"
+PENDING = KEY + ".pending"
+
+
+def prepare():
+    try:
+        info = os.lstat(PENDING)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("invalid staging path")
+        os.chmod(PENDING, 0o600)
+    except FileNotFoundError:
+        fd = os.open(PENDING, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+
+
+def activate():
+    info = os.lstat(PENDING)
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 16_384:
+        raise ValueError("invalid key file")
+    with open(PENDING, "rb") as source:
+        key = serialization.load_pem_private_key(source.read(), password=None)
+    if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
+        raise ValueError("expected an unencrypted P-256 APNs key")
+    os.chmod(PENDING, 0o600)
+    os.replace(PENDING, KEY)
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) == 2 else ""
+    if action == "status":
+        print("configured" if os.path.isfile(KEY) else "missing")
+    elif action == "prepare":
+        prepare()
+    elif action == "activate":
+        activate()
+    elif action == "remove":
+        try:
+            os.unlink(KEY)
+        except FileNotFoundError:
+            pass
+    else:
+        raise ValueError("expected status, prepare, activate, or remove")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, TypeError):
+        sys.exit("APNs key operation failed")

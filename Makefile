@@ -1,7 +1,7 @@
 PROJECT := SIM Anywhere.xcodeproj
 SCHEME := SIMAnywhere
-BUNDLE_ID := net.janlay.simanywhere
-TEAM_ID ?= 28466ZMF85
+BUNDLE_ID ?= net.janlay.simanywhere
+TEAM_ID ?=
 DEBUG_DESTINATION ?= generic/platform=iOS Simulator
 DEBUG_SIGNING ?= NO
 RELEASE_DESTINATION ?= generic/platform=iOS
@@ -28,6 +28,7 @@ debug: generate
 	$(XCODEBUILD) -project '$(PROJECT)' -scheme $(SCHEME) -configuration Debug \
 		-destination '$(DEBUG_DESTINATION)' -derivedDataPath '$(BUILD_ROOT)/debug' \
 		DEVELOPMENT_TEAM=$(TEAM_ID) CODE_SIGNING_ALLOWED=$(DEBUG_SIGNING) \
+		SIM_ANYWHERE_BUNDLE_ID=$(BUNDLE_ID) \
 		SIM_ANYWHERE_GIT_SHORT_HASH=$(GIT_SHORT_HASH) build
 
 # project.yml is the source of truth; XcodeGen recreates the project and Info.plist.
@@ -41,6 +42,7 @@ release:
 	$(XCODEBUILD) -project '$(PROJECT)' -scheme $(SCHEME) -configuration Release \
 		-destination '$(RELEASE_DESTINATION)' -derivedDataPath '$(BUILD_ROOT)/release' \
 		DEVELOPMENT_TEAM=$(TEAM_ID) CODE_SIGNING_ALLOWED=$(RELEASE_SIGNING) \
+		SIM_ANYWHERE_BUNDLE_ID=$(BUNDLE_ID) \
 		SIM_ANYWHERE_GIT_SHORT_HASH=$(GIT_SHORT_HASH) build
 
 # Archive the current, committed Release build number; run make release first.
@@ -50,6 +52,7 @@ archive: check-signing-session check-clean-tree generate
 	umask 022 && $(XCODEBUILD) -project '$(PROJECT)' -scheme $(SCHEME) -configuration Release \
 		-destination 'generic/platform=iOS' -derivedDataPath '$(BUILD_ROOT)/archive' \
 		-archivePath '$(ARCHIVE_PATH)' DEVELOPMENT_TEAM=$(TEAM_ID) \
+		SIM_ANYWHERE_BUNDLE_ID=$(BUNDLE_ID) \
 		SIM_ANYWHERE_GIT_SHORT_HASH=$(GIT_SHORT_HASH) archive
 	umask 022 && $(XCODEBUILD) -exportArchive -archivePath '$(ARCHIVE_PATH)' \
 		-exportPath '$(EXPORT_PATH)' -exportOptionsPlist Scripts/ExportOptions.plist $(ASC_AUTH)

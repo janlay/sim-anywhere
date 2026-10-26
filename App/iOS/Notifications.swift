@@ -4,7 +4,7 @@ import UserNotifications
 
 // New SMS notifications and the background check.
 enum SMSWatch {
-    static let taskID = "net.janlay.SIMAnywhere.smscheck"
+    static let taskID = (Bundle.main.bundleIdentifier ?? "net.janlay.simanywhere") + ".smscheck"
     private static let foreground = Foreground()
 
     /// Call once at launch.

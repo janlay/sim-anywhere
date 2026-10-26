@@ -83,6 +83,12 @@ struct CallRecord: Decodable, Identifiable, Hashable, Sendable {
 
 private struct CallList: Decodable { var calls: [CallRecord] }
 
+enum VoIPStatus: String, Decodable, Sendable {
+    case active, ineffective, unconfigured
+}
+
+private struct VoIPStatusResponse: Decodable { var state: VoIPStatus }
+
 struct ATResponse: Decodable, Sendable {
     var command: String
     var lines: [String]
@@ -242,6 +248,22 @@ struct DongleAPI: Sendable {
 
     func deleteCalls(_ ids: [String]) async throws {
         let _: Empty = try await call("DELETE", "calls", query: ["ids": ids.joined(separator: ",")])
+    }
+
+    func registerVoIPDevice(_ device: String, token: String, environment: String) async throws {
+        let _: Empty = try await call("POST", "push/register",
+                                      body: ["device": .s(device), "token": .s(token), "environment": .s(environment)])
+    }
+
+    func unregisterVoIPDevice(_ device: String) async throws {
+        let _: Empty = try await call("DELETE", "push/register", body: ["device": .s(device)])
+    }
+
+    func voipStatus(device: String, bundleID: String, environment: String) async throws -> VoIPStatus {
+        let response: VoIPStatusResponse = try await call("GET", "push/status", query: [
+            "device": device, "bundle_id": bundleID, "environment": environment,
+        ])
+        return response.state
     }
 
     /// Data plan usage of this month and today, in bytes. 0 limits mean no limit.

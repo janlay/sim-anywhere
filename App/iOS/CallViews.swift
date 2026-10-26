@@ -32,7 +32,15 @@ struct PhoneView: View {
                 case "registered": Label("Wi-Fi Calling 已注册", systemImage: "wifi")
                 case "connecting": Label("Wi-Fi Calling 正在连接…", systemImage: "wifi").foregroundStyle(.secondary)
                 case "error": Label("Wi-Fi Calling 出错，通话改走模组", systemImage: "wifi.exclamationmark").foregroundStyle(.orange)
-                default: EmptyView()
+                default: Label("Wi-Fi Calling 未注册", systemImage: "wifi.slash").foregroundStyle(.secondary)
+                }
+                switch phone.voipStatus {
+                case .active:
+                    Label("VoIP已生效", systemImage: "checkmark.shield.fill").foregroundStyle(.green)
+                case .ineffective:
+                    Label("VoIP 未生效，仅限App内通话", systemImage: "exclamationmark.shield.fill").foregroundStyle(.orange)
+                case .unconfigured:
+                    Label("VoIP未配置，仅限App内通话", systemImage: "bell.slash.fill").foregroundStyle(.secondary)
                 }
                 Section {
                     HStack {
@@ -76,8 +84,9 @@ struct PhoneView: View {
                     }
                     .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { fieldFrame = $0 }
                 } footer: {
-                    Text(phone.path == "wifi" ? "通话经节点的 Wi-Fi Calling（运营商 IMS）接通，按 SIM 卡资费计费。仅在 App 打开时可以接听来电。"
-                                              : "通话经节点上的 4G 模组接通，按 SIM 卡资费计费。仅在 App 打开时可以接听来电。")
+                    Text((phone.path == "wifi" ? "通话经节点的 Wi-Fi Calling（运营商 IMS）接通，按 SIM 卡资费计费。"
+                                                : "通话经节点上的 4G 模组接通，按 SIM 卡资费计费。")
+                         + (phone.voipStatus == .active ? "后台来电通知已启用，接听时需能连接节点。" : "仅在 App 打开时可以接听来电。"))
                 }
                 Section("通话记录") {
                     if let e = store.callsError {
@@ -132,9 +141,23 @@ struct PhoneView: View {
             .navigationTitle("电话")
             .environment(\.editMode, $editMode)
             .toolbar { toolbar }
-            .refreshable { await store.refreshCalls() }
-            .task(id: store.host) { await store.refreshCalls() }
-            .onChange(of: phone.ended) { Task { await store.refreshCalls() } }
+            .refreshable {
+                await store.refreshCalls()
+                await phone.refreshVoIPStatus(host: store.host)
+            }
+            .task(id: store.host) {
+                await store.refreshCalls()
+                while !Task.isCancelled {
+                    await phone.refreshVoIPStatus(host: store.host)
+                    try? await Task.sleep(for: .seconds(30))
+                }
+            }
+            .onChange(of: phone.ended) {
+                Task {
+                    await store.refreshCalls()
+                    await phone.refreshVoIPStatus(host: store.host)
+                }
+            }
             .onChange(of: box) { selection = [] }
             .confirmDial($confirm)
             .confirmationDialog("确定要删除所选的 \(pendingDelete.count) 条通话记录吗？此操作不可撤销。",
