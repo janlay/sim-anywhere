@@ -29,6 +29,7 @@ import discovery as D
 
 SOCK_PATH = "/var/run/dongle-vowifid.sock"
 PHONE_PATH = "/tmp/dongle-vowifi-phone.json"
+STATUS_PATH = "/tmp/dongle-web/status.json"
 AMR_PT = 104
 TE_PT = 101
 RTP_PORT = 50000
@@ -36,6 +37,16 @@ RTCP_PORT = 50001
 # Compatibility profile for the current M1 roaming SIM. Use only when
 # standardized DNS discovery returns no usable endpoint.
 EPDG_PROFILES = {("525", "03"): ("202.65.241.82", "202.65.240.210")}
+
+
+class NoEPDG(Exception):
+    pass
+
+
+def subscription_rejected(error):
+    reason = str(error)
+    return ("Notify 24" in reason or "Notify error 24" in reason or "EAP-Failure" in reason
+            or reason.startswith("REGISTER failed 403 "))
 MARK = 0x401
 SEC_ALG = ("hmac-sha-1-96", "aes-cbc")
 EPDG_MEMO = "/var/lib/dongle-vowifid/last_epdg"
@@ -571,10 +582,14 @@ class Daemon:
     def connect_loop(self):
         backoff = [10, 30, 60, 300]
         i = 0
+        no_epdg = 0
+        no_epdg_imsi = None
         while self.running and not self.stop_flag:
             try:
                 self.connect()
                 i = 0
+                no_epdg = 0
+                no_epdg_imsi = None
                 time.sleep(1)
                 while self.running and self.ike is not None and not self.stop_flag:
                     time.sleep(2)
@@ -582,16 +597,40 @@ class Daemon:
                     break
             except Exception as e:
                 log("connect failed:", type(e).__name__, str(e)[:200])
-                self.set_wifi("error")
                 self.ike = None
                 self.client = None
+                if isinstance(e, NoEPDG):
+                    no_epdg = no_epdg + 1 if no_epdg_imsi == self.imsi else 1
+                    no_epdg_imsi = self.imsi
+                else:
+                    no_epdg = 0
+                rejected = subscription_rejected(e)
+                if rejected or no_epdg >= 3:
+                    self.set_wifi("unsupported" if rejected else "unavailable")
+                    self.wait_for_new_sim()
+                    i = no_epdg = 0
+                    no_epdg_imsi = None
+                    continue
+                self.set_wifi("error")
             if not self.running or self.stop_flag:
                 break
             wait = backoff[min(i, len(backoff) - 1)]
             i += 1
             log("reconnect in %d s" % wait)
-            self.set_wifi("connecting")
             time.sleep(wait)
+
+    def wait_for_new_sim(self):
+        since = time.time()
+        while self.running and not self.stop_flag:
+            try:
+                with open(STATUS_PATH) as source:
+                    status = json.load(source)
+                if status.get("epoch", 0) > since and status.get("imsi") and status["imsi"] != self.imsi:
+                    log("SIM changed; retry Wi-Fi Calling")
+                    return
+            except (OSError, ValueError):
+                pass
+            time.sleep(10)
 
     def epdg_order(self):
         cands = list(self.epdg_candidates)
@@ -636,7 +675,7 @@ class Daemon:
             ([self.epdg_fallback_override] if self.epdg_fallback_override else []) +
             list(profile)))
         if not self.epdg_candidates:
-            raise RuntimeError("no ePDG found for HPLMN %s-%s" % (mcc, mnc))
+            raise NoEPDG("no ePDG found for HPLMN %s-%s" % (mcc, mnc))
         log("HPLMN", mcc + mnc, "serving MCC", serving_plmn[:3],
             "registration", "roaming" if reg_state == 5 else "home",
             "ePDG candidates", len(self.epdg_candidates),

@@ -305,6 +305,7 @@ return view.extend({
 		o = s.option(form.DummyValue, '_apns_key', _('APNs 私钥'),
 			_('选择 Apple Developer 下载的 .p8 文件。密钥仅上传至本节点的 root 专用文件，不会回显。请通过可信的本地网络或 HTTPS 打开 LuCI。'));
 		o.renderWidget = function() {
+			var configured = String(data[4]).trim() == 'configured';
 			var input = E('input', { 'type': 'file', 'accept': '.p8', 'style': 'max-width:260px' });
 			var button = E('button', { 'type': 'button', 'class': 'cbi-button cbi-button-apply',
 				'click': function() {
@@ -325,9 +326,20 @@ return view.extend({
 					});
 				}
 			}, _('上传密钥'));
+			var remove = E('button', { 'type': 'button', 'class': 'cbi-button cbi-button-negative',
+				'click': function() {
+					if (!window.confirm(_('删除节点上的 APNs 私钥并清除 Team ID、Key ID 和 Bundle ID？')))
+						return;
+					return fs.exec_direct('/usr/bin/sim-anywhere-push-key', [ 'remove' ]).then(function() {
+						window.location.reload();
+					}, function() {
+						ui.addNotification(null, E('p', _('删除 APNs 配置失败。')), 'error');
+					});
+				}
+			}, _('删除密钥与设置'));
 			return E('div', {}, [
-				E('div', {}, String(data[4]).trim() == 'configured' ? _('已配置') : _('未配置')),
-				E('div', { 'style': 'display:flex;gap:8px;align-items:center;margin-top:6px' }, [ input, button ])
+				E('div', {}, configured ? _('已配置') : _('未配置')),
+				E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:6px' }, configured ? [ input, button, remove ] : [ input, button ])
 			]);
 		};
 

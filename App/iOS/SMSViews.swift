@@ -56,8 +56,14 @@ struct SMSListView: View {
             .navigationDestination(for: SMSMessage.self) { SMSDetailView(message: $0, compose: $compose) }
             .environment(\.editMode, $editMode)
             .refreshable { await store.refreshSMS(sync: true) }
-            .task(id: store.host) { await store.refreshSMS() }
+            .task(id: store.host) {
+                while !Task.isCancelled {
+                    await store.refreshSMS()
+                    try? await Task.sleep(for: .seconds(30))
+                }
+            }
             .toolbar { toolbar }
+            .onChange(of: store.selectedCard) { selection = []; editMode = .inactive }
             .safeAreaInset(edge: .top) {
                 Picker("信箱", selection: $box) {
                     Text("全部").tag("")
@@ -108,13 +114,15 @@ struct SMSListView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) {
-            Button(editMode.isEditing ? "完成" : "选择") {
+        ToolbarItemGroup(placement: .topBarLeading) {
+            SIMCardMenu()
+        }
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            Button(editMode.isEditing ? "完成" : "选择", systemImage: editMode.isEditing ? "checkmark" : "checkmark.circle") {
                 selection = []
                 editMode = editMode.isEditing ? .inactive : .active
             }
-        }
-        ToolbarItemGroup(placement: .topBarTrailing) {
+            .labelStyle(.iconOnly)
             if editMode.isEditing {
                 let ids = Array(selection)
                 if let m = replyTarget {

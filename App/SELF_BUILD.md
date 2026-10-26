@@ -6,7 +6,7 @@ This setup uses your own Apple Developer team and your own OpenWrt node. The nod
 
 1. Create an explicit App ID with a unique Bundle ID in your Apple Developer account. Enable Push Notifications for that App ID and create provisioning profiles for the build you will install.
 2. Create an APNs authentication key for the same team and app topic. Download its `.p8` file once. Record the Team ID and Key ID. Keep the `.p8` file private.
-3. Build and install the app with the same Bundle ID and your Team ID. For a signed development build on a connected iPhone, use `make debug TEAM_ID=YOUR_TEAM_ID BUNDLE_ID=your.unique.bundle.id DEBUG_SIGNING=YES DEBUG_DESTINATION='platform=iOS,id=YOUR_DEVICE_ID'`. For a signed Release build, use `make release TEAM_ID=YOUR_TEAM_ID BUNDLE_ID=your.unique.bundle.id`. Do not commit your key.
+3. Build and install the app with the same Bundle ID and your Team ID. For a signed development build on a connected iPhone, use `make debug TEAM_ID=YOUR_TEAM_ID BUNDLE_ID=your.unique.bundle.id DEBUG_SIGNING=YES DEBUG_DESTINATION='platform=iOS,id=YOUR_DEVICE_ID'`. If Xcode selects a wildcard profile, add `DEBUG_PROFILE='YOUR_EXPLICIT_PROFILE_NAME'` to that command. The selected profile must include Push Notifications. For a signed Release build, use `make release TEAM_ID=YOUR_TEAM_ID BUNDLE_ID=your.unique.bundle.id`. Do not commit your key.
 
 The app registers a VoIP device token when it starts. Development builds use the APNs sandbox. Release builds use production. The Bundle ID passed to `make` also sets the background SMS task identifier. A provisioning profile without the Push Notifications capability cannot receive VoIP pushes.
 

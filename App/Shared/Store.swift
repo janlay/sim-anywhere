@@ -58,6 +58,7 @@ final class Store {
             status = nil; traffic = nil; rateHistory = []; server = nil; serverError = nil
             isConnecting = false; statusError = nil; smsError = nil; callsError = nil
             history = []; quota = nil; messages = []; unread = 0; calls = []
+            cards = []; currentCard = nil; selectedCard = nil
             proxyGroups = nil; proxyError = nil; exitDelay = nil
             helloed = nil
         }
@@ -81,11 +82,34 @@ final class Store {
     var calls: [CallRecord] = []
     var callsError: String?
 
+    var cards: [SIMCard] = []
+    var currentCard: String?
+    var selectedCard: String?
+
     var proxyGroups: ProxyGroups?
     var proxyError: String?
     var exitDelay: Int?          // latest delay of the 4G exit proxy; nil when unknown or unavailable
 
-    var api: DongleAPI? { DongleAPI(host: host) }
+    var api: DongleAPI? { DongleAPI(host: host, card: selectedCard) }
+
+    func refreshCards() async {
+        let requestedHost = host
+        guard let result = try? await DongleAPI(host: requestedHost)?.cards(), host == requestedHost else { return }
+        if currentCard != result.current {
+            currentCard = result.current
+            selectedCard = result.current
+            messages = []; unread = 0; calls = []
+        }
+        cards = result.cards
+    }
+
+    func selectCard(_ id: String) async {
+        guard cards.contains(where: { $0.id == id }), selectedCard != id else { return }
+        selectedCard = id
+        messages = []; unread = 0; calls = []
+        await refreshSMS()
+        await refreshCalls()
+    }
 
     /// The host this app connection already reported to, so the notice goes out once per connection
     /// and not on every reconnect of the status stream.
@@ -178,25 +202,36 @@ final class Store {
 
     func refreshSMS(sync: Bool = false) async {
         guard !host.isEmpty else { messages = []; unread = 0; smsError = nil; return }
+        await refreshCards()
+        let requestedHost = host, requestedCard = selectedCard
         do {
             let api = try require()
             if sync { try await api.sync() }
             let list = try await api.sms()
+            guard host == requestedHost && selectedCard == requestedCard else { return }
             messages = list.messages
             unread = list.unread
             smsError = nil
-            await SMSWatch.check(list, host: host)
+            if selectedCard == currentCard { await SMSWatch.check(list, host: host) }
         } catch {
+            guard host == requestedHost && selectedCard == requestedCard else { return }
+            messages = []; unread = 0
             smsError = error.localizedDescription
         }
     }
 
     func refreshCalls() async {
         guard !host.isEmpty else { calls = []; callsError = nil; return }
+        await refreshCards()
+        let requestedHost = host, requestedCard = selectedCard
         do {
-            calls = try await require().calls()
+            let list = try await require().calls()
+            guard host == requestedHost && selectedCard == requestedCard else { return }
+            calls = list
             callsError = nil
         } catch {
+            guard host == requestedHost && selectedCard == requestedCard else { return }
+            calls = []
             callsError = error.localizedDescription
         }
     }

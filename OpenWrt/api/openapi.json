@@ -194,6 +194,15 @@
         "out"
        ]
       }
+     },
+     {
+      "name": "card",
+      "in": "query",
+      "description": "ICCID from GET /cards, legacy for records without a known SIM, or unknown while the current SIM is unreadable. Defaults to the current SIM.",
+      "schema": {
+       "type": "string",
+       "pattern": "^(legacy|unknown|[0-9A-Fa-f]{18,22})$"
+      }
      }
     ],
     "responses": {
@@ -342,7 +351,18 @@
      "503": {
       "$ref": "#/components/responses/Error"
      }
-    }
+    },
+    "parameters": [
+     {
+      "name": "card",
+      "in": "query",
+      "description": "ICCID from GET /cards, legacy for records without a known SIM, or unknown while the current SIM is unreadable. Defaults to the current SIM.",
+      "schema": {
+       "type": "string",
+       "pattern": "^(legacy|unknown|[0-9A-Fa-f]{18,22})$"
+      }
+     }
+    ]
    },
    "delete": {
     "tags": [
@@ -361,6 +381,15 @@
        "type": "string"
       },
       "example": "080fd93e54b1,9b517ba134f4-54f77dcca43d"
+     },
+     {
+      "name": "card",
+      "in": "query",
+      "description": "ICCID from GET /cards, legacy for records without a known SIM, or unknown while the current SIM is unreadable. Defaults to the current SIM.",
+      "schema": {
+       "type": "string",
+       "pattern": "^(legacy|unknown|[0-9A-Fa-f]{18,22})$"
+      }
      }
     ],
     "responses": {
@@ -427,7 +456,18 @@
      "503": {
       "$ref": "#/components/responses/Error"
      }
-    }
+    },
+    "parameters": [
+     {
+      "name": "card",
+      "in": "query",
+      "description": "ICCID from GET /cards, legacy for records without a known SIM, or unknown while the current SIM is unreadable. Defaults to the current SIM.",
+      "schema": {
+       "type": "string",
+       "pattern": "^(legacy|unknown|[0-9A-Fa-f]{18,22})$"
+      }
+     }
+    ]
    },
    "delete": {
     "tags": [
@@ -448,7 +488,18 @@
      "503": {
       "$ref": "#/components/responses/Error"
      }
-    }
+    },
+    "parameters": [
+     {
+      "name": "card",
+      "in": "query",
+      "description": "ICCID from GET /cards, legacy for records without a known SIM, or unknown while the current SIM is unreadable. Defaults to the current SIM.",
+      "schema": {
+       "type": "string",
+       "pattern": "^(legacy|unknown|[0-9A-Fa-f]{18,22})$"
+      }
+     }
+    ]
    }
   },
   "/sms/sync": {
@@ -620,50 +671,160 @@
   },
   "/push/register": {
    "post": {
-    "tags": ["Calls"],
+    "tags": [
+     "Calls"
+    ],
     "summary": "Register a device for incoming VoIP call pushes",
     "operationId": "registerVoIPDevice",
     "description": "Stores one VoIP token per stable device id. The token is never returned by the API. At most eight devices can be registered. This endpoint uses the same trusted-LAN access model as the rest of the API.",
     "requestBody": {
      "required": true,
-     "content": { "application/json": { "schema": {
-      "type": "object", "required": ["device", "token", "environment"],
-      "properties": {
-       "device": { "type": "string", "format": "uuid" },
-       "token": { "type": "string", "pattern": "^[0-9a-f]{32,256}$" },
-       "environment": { "type": "string", "enum": ["development", "production"] }
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "device",
+         "token",
+         "environment"
+        ],
+        "properties": {
+         "device": {
+          "type": "string",
+          "format": "uuid"
+         },
+         "token": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32,256}$"
+         },
+         "environment": {
+          "type": "string",
+          "enum": [
+           "development",
+           "production"
+          ]
+         }
+        }
+       }
       }
-     } } }
+     }
     },
-    "responses": { "200": { "description": "Registration saved" }, "400": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" } }
+    "responses": {
+     "200": {
+      "description": "Registration saved"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
    },
    "delete": {
-    "tags": ["Calls"], "summary": "Remove a device's VoIP token", "operationId": "unregisterVoIPDevice",
-    "requestBody": { "required": true, "content": { "application/json": { "schema": {
-     "type": "object", "required": ["device"], "properties": { "device": { "type": "string", "format": "uuid" } }
-    } } } },
-    "responses": { "200": { "description": "Registration removed" }, "400": { "$ref": "#/components/responses/Error" } }
+    "tags": [
+     "Calls"
+    ],
+    "summary": "Remove a device's VoIP token",
+    "operationId": "unregisterVoIPDevice",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "device"
+        ],
+        "properties": {
+         "device": {
+          "type": "string",
+          "format": "uuid"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Registration removed"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
    }
   },
   "/push/status": {
    "get": {
-    "tags": ["Calls"],
+    "tags": [
+     "Calls"
+    ],
     "summary": "Check VoIP push readiness for one app device",
     "operationId": "getVoIPStatus",
     "description": "Returns unconfigured when APNs identifiers or key are missing. Returns ineffective when the key cannot sign, the app Bundle ID does not match, the device token is absent, or APNs has not accepted a real incoming-call push for the current configuration and token. Active means APNs accepted the most recent real push for this device; it does not guarantee delivery to the phone. No key or token is returned.",
     "parameters": [
-     { "name": "device", "in": "query", "required": true, "schema": { "type": "string", "format": "uuid" } },
-     { "name": "bundle_id", "in": "query", "required": true, "schema": { "type": "string" } },
-     { "name": "environment", "in": "query", "required": true, "schema": { "type": "string", "enum": ["development", "production"] } }
+     {
+      "name": "device",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "bundle_id",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "environment",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "enum": [
+        "development",
+        "production"
+       ]
+      }
+     }
     ],
     "responses": {
-     "200": { "description": "VoIP status", "content": { "application/json": { "schema": {
-      "type": "object", "required": ["state"], "properties": {
-       "state": { "type": "string", "enum": ["active", "ineffective", "unconfigured"] }
+     "200": {
+      "description": "VoIP status",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": [
+          "state"
+         ],
+         "properties": {
+          "state": {
+           "type": "string",
+           "enum": [
+            "active",
+            "ineffective",
+            "unconfigured"
+           ]
+          }
+         }
+        }
+       }
       }
-     } } } },
-     "400": { "$ref": "#/components/responses/Error" },
-     "502": { "$ref": "#/components/responses/Error" }
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     }
     }
    }
   },
@@ -696,7 +857,18 @@
      "503": {
       "$ref": "#/components/responses/Error"
      }
-    }
+    },
+    "parameters": [
+     {
+      "name": "card",
+      "in": "query",
+      "description": "ICCID from GET /cards, legacy for records without a known SIM, or unknown while the current SIM is unreadable. Defaults to the current SIM.",
+      "schema": {
+       "type": "string",
+       "pattern": "^(legacy|unknown|[0-9A-Fa-f]{18,22})$"
+      }
+     }
+    ]
    },
    "delete": {
     "tags": [
@@ -715,6 +887,15 @@
        "type": "string"
       },
       "example": "9b517ba134f4"
+     },
+     {
+      "name": "card",
+      "in": "query",
+      "description": "ICCID from GET /cards, legacy for records without a known SIM, or unknown while the current SIM is unreadable. Defaults to the current SIM.",
+      "schema": {
+       "type": "string",
+       "pattern": "^(legacy|unknown|[0-9A-Fa-f]{18,22})$"
+      }
      }
     ],
     "responses": {
@@ -986,6 +1167,55 @@
      },
      "502": {
       "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/cards": {
+   "get": {
+    "tags": [
+     "SMS",
+     "Calls"
+    ],
+    "summary": "List SIM record groups",
+    "operationId": "getCards",
+    "description": "Returns the current SIM and every SIM with archived SMS or calls. Legacy records have no reliable SIM identity.",
+    "responses": {
+     "200": {
+      "description": "Current and archived SIM groups",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "current": {
+           "type": "string"
+          },
+          "cards": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "id": {
+              "type": "string"
+             },
+             "current": {
+              "type": "boolean"
+             },
+             "phone_masked": {
+              "type": ["string", "null"],
+              "description": "Masked own number for the current SIM when available; null for historical and unrecognized groups. No plaintext own number is returned."
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
      },
      "503": {
       "$ref": "#/components/responses/Error"
@@ -1422,7 +1652,10 @@
       "const": "state"
      },
      "call_id": {
-      "type": ["string", "null"],
+      "type": [
+       "string",
+       "null"
+      ],
       "format": "uuid",
       "description": "Stable for this call; also sent in its VoIP push. Null while idle."
      },

@@ -9,7 +9,7 @@
 #   Wi-Fi Calling: when sim-anywhere-vowifid (UNIX socket, same ops and PCM) is registered, calls go through it.
 #     State adds "path" (wifi | modem) and "wifi" (registered | connecting | error | off).
 #     Modem incoming calls are ignored then: the IMS forks the call to both contacts, and a modem reject could end it.
-#   Call log: /root/dongle-calls.tsv (uid, in|out, epoch, number, answered 0|1, seconds), served by sim-anywhere-api GET /calls.
+#   Call log: /root/dongle-calls.tsv (uid, in|out, epoch, number, answered 0|1, seconds, ICCID), served by GET /calls.
 #   sim-anywhere-api DELETE /calls rewrites the log under CALLS_LOCK; write_log takes the same lock.
 import array, base64, fcntl, glob, hashlib, json, os, re, selectors, socket, struct, subprocess, time, tty
 
@@ -267,6 +267,7 @@ class Call:
     def reset(self):
         self.state, self.dir, self.number = 'idle', None, None
         self.call_id = None
+        self.card = None
         self.pushed = False
         self.since = self.active_since = None
         self.owner = None
@@ -297,6 +298,18 @@ class Call:
     def poll(self):
         self.next_poll = time.time() + (1 if self.state != 'idle' else 10)
         modem.cmd('AT+CLCC', self.on_clcc)
+
+    def capture_card(self):
+        call_id = self.call_id
+        def received(lines, result):
+            if result != 'OK' or self.call_id != call_id:
+                return
+            for line in lines:
+                match = re.match(r'^\+QCCID:\s*([0-9A-Fa-f]{18,22})$', line)
+                if match:
+                    self.card = match.group(1)
+                    return
+        modem.cmd('AT+QCCID', received)
 
     def tick(self):
         if modem.ready() and time.time() >= self.next_poll and not modem.cur and not modem.queue:
@@ -335,6 +348,7 @@ class Call:
         if self.state == 'idle':
             self.dir, self.since, self.reason = ('in' if d == 1 else 'out'), now(), None
             self.call_id = call_uuid()
+            self.capture_card()
             self.number = number or self.number
             changed = True
         if number and number != self.number:
@@ -356,7 +370,7 @@ class Call:
         answered = self.active_since is not None
         secs = now() - self.active_since if answered else 0
         if self.since:
-            write_log(self.dir, self.since, self.number or '', answered, secs)
+            write_log(self.dir, self.since, self.number or '', answered, secs, self.card)
         log('call end', 'wifi' if self.wifi else 'modem', self.dir, self.number,
             'answered' if answered else 'not answered', secs, self.reason)
         if not self.wifi:
@@ -515,6 +529,7 @@ class Call:
                 return wifi.op({'op': 'hangup'})
             self.wifi, self.since, self.reason = True, now(), None
             self.call_id = call_uuid()
+            self.capture_card()
         self.wifi_seen = True
         self.dir, self.number = m.get('dir') or self.dir, m.get('number') or self.number
         if st != self.state:
@@ -625,12 +640,13 @@ class Call:
                 self.stats['up_drop'] += 1
 
 
-def write_log(d, epoch, number, answered, secs):
-    uid = hashlib.md5(('%s %s %s' % (epoch, d, number)).encode()).hexdigest()[:12]
+def write_log(d, epoch, number, answered, secs, card):
+    uid = hashlib.md5(('%s %s %s %s' % (card or '', epoch, d, number)).encode()).hexdigest()[:12]
     with open(CALLS_LOCK, 'w') as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         with open(LOG, 'a') as f:
-            f.write('%s\t%s\t%d\t%s\t%d\t%d\n' % (uid, d, epoch, number, 1 if answered else 0, secs))
+            row = '%s\t%s\t%d\t%s\t%d\t%d' % (uid, d, epoch, number, 1 if answered else 0, secs)
+            f.write(row + ('\t' + card if card else '') + '\n')
         with open(LOG) as f:
             rows = f.readlines()
         if len(rows) > MAXLOG * 1.2:

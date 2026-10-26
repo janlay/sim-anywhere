@@ -2,12 +2,13 @@
 // sim-anywhere-api: JSON API for the 4G dongle (CGI). Spec: /sim-anywhere/openapi.json
 //   GET    /status                  latest sample
 //   GET    /history?window=|since=  samples, columnar
-//   GET    /sms?box=in|out          messages (long SMS merged)
+//   GET    /cards                   current SIM and archived record groups
+//   GET    /sms?box=in|out&card=    messages (long SMS merged), current SIM by default
 //   POST   /sms {to,text,dry_run}   send (or count parts)
 //   POST   /sms/sync                pull new SMS from the modem
 //   PATCH  /sms[/{id}] {read,ids}   mark read / unread
 //   DELETE /sms[/{id}][?ids=]       delete from the archive
-//   GET    /calls                   call log (written by sim-anywhere-calld; calls use ws://<host>:8765/call)
+//   GET    /calls?card=             call log (written by sim-anywhere-calld; current SIM by default)
 //   POST   /push/register           register this device's VoIP push token
 //   DELETE /push/register           remove this device's token
 //   GET    /push/status             configuration and last APNs acceptance for this device
@@ -254,17 +255,30 @@ function smsEncode(to, text, ref) {
 
 /* ---------- archive ---------- */
 function iso(t) { let g = gmtime(t); return sprintf('%04d-%02d-%02dT%02d:%02d:%02dZ', g.year, g.mon, g.mday, g.hour, g.min, g.sec); }
+function current_card() {
+	let s = null;
+	try { s = json(fs.readfile(STATUS) || 'null'); } catch (e) {}
+	return s != null && s.present == 1 && s.sim == 'ready' && +s.epoch >= time() - 180
+		&& type(s.iccid) == 'string' && match(s.iccid, /^[0-9A-Fa-f]{18,22}$/) ? s.iccid : null;
+}
+function selected_card() {
+	let id = Q.card ?? current_card() ?? 'unknown';
+	if (id != 'legacy' && id != 'unknown' && !match(id, /^[0-9A-Fa-f]{18,22}$/)) fail(400, 'invalid card');
+	return id;
+}
+function record_card(id) { return id || 'legacy'; }
 function rows() {
 	let o = [];
 	for (let l in split(fs.readfile(SMS) || '', '\n')) {
 		let r = split(l, '\t');
-		if (length(r) == 5) push(o, { uid: r[0], box: r[1], epoch: +r[2], read: r[3] == '1', pdu: r[4] });
+		if (length(r) == 5 || length(r) == 6) push(o, { uid: r[0], box: r[1], epoch: +r[2], read: r[3] == '1', pdu: r[4], card: r[5] ?? '' });
 	}
 	return o;
 }
-function messages() {
+function messages(card) {
 	let groups = {}, order = [];
 	for (let r in rows()) {
+		if (record_card(r.card) != card) continue;
 		let m;
 		try { m = smsDecode(r.pdu); } catch (e) { m = { num: '', ts: null, text: '', part: null }; }
 		let key = m.part ? `${r.box}|${m.num}|${m.part.ref}|${m.part.total}` : r.uid;
@@ -293,15 +307,19 @@ function uids(ids) {
 	return o;
 }
 // rewrite the archive under the AT lock; fn(row) returns the row to keep or null
-function rewrite(set, fn) {
+function rewrite(set, fn, card) {
 	let lk = fs.open(LOCK, 'w');
 	lk.lock('x');
 	let n = 0, out = '';
 	for (let r in rows()) {
-		let hit = set[r.uid];
+		let hit = set[r.uid] && record_card(r.card) == card;
 		if (hit) n++;
 		r = hit ? fn(r) : r;
-		if (r) out += join('\t', [r.uid, r.box, r.epoch, r.read ? 1 : 0, r.pdu]) + '\n';
+		if (r) {
+			let fields = [r.uid, r.box, r.epoch, r.read ? 1 : 0, r.pdu];
+			if (r.card) push(fields, r.card);
+			out += join('\t', fields) + '\n';
+		}
 	}
 	if (n) { fs.writefile(SMS + '.tmp', out); fs.rename(SMS + '.tmp', SMS); }
 	lk.close();
@@ -359,13 +377,27 @@ function history() {
 }
 
 /* ---------- call log ---------- */
-function calls() {
+function call_rows() {
 	let o = [];
 	for (let l in split(fs.readfile(CALLS) || '', '\n')) {
 		let r = split(l, '\t');
-		if (length(r) == 6) push(o, { id: r[0], dir: r[1], number: r[3], time: iso(+r[2]), epoch: +r[2], answered: r[4] == '1', duration: +r[5] });
+		if (length(r) == 6 || length(r) == 7) push(o, { id: r[0], dir: r[1], number: r[3], time: iso(+r[2]), epoch: +r[2], answered: r[4] == '1', duration: +r[5], card: r[6] ?? '' });
 	}
-	return reverse(o);
+	return o;
+}
+function calls(card) {
+	return reverse(filter(call_rows(), r => record_card(r.card) == card));
+}
+function cards() {
+	let current = current_card() ?? 'unknown', ids = {};
+	ids[current] = true;
+	for (let r in rows()) ids[record_card(r.card)] = true;
+	for (let r in call_rows()) ids[record_card(r.card)] = true;
+	let s = null;
+	try { s = json(fs.readfile(STATUS) || 'null'); } catch (e) {}
+	let phone = current != 'unknown' && s != null ? status_phone(s) : null;
+	let list = map(keys(ids), id => ({ id, current: id == current, phone_masked: id == current ? phone : null }));
+	return { current, cards: sort(list, (a, b) => a.current ? -1 : b.current ? 1 : a.id < b.id ? -1 : 1) };
 }
 function call_ids(ids) {
 	let o = {};
@@ -377,14 +409,14 @@ function call_ids(ids) {
 	return o;
 }
 // sim-anywhere-calld appends to the log under the same lock.
-function rewrite_calls(set) {
+function rewrite_calls(set, card) {
 	let lk = fs.open(CALLS_LOCK, 'w');
 	lk.lock('x');
 	let n = 0, out = [];
 	for (let l in split(fs.readfile(CALLS) || '', '\n')) {
 		let r = split(l, '\t');
-		if (length(r) != 6) continue;
-		if (set[r[0]]) { n++; continue; }
+		if (length(r) != 6 && length(r) != 7) continue;
+		if (set[r[0]] && record_card(r[6]) == card) { n++; continue; }
 		push(out, l);
 	}
 	if (n) {
@@ -426,7 +458,7 @@ function status_stream(seconds) {
 let r0 = PATH[0] ?? '', r1 = PATH[1];
 if (r0 == '') {
 	if (METHOD != 'GET') fail(405, 'method not allowed');
-	reply(200, { name: 'SIM Anywhere API', spec: SPEC, endpoints: ['status', 'history', 'sms', 'sms/sync', 'calls', 'at', 'quota', 'push/register', 'push/status', 'proxy/status', 'proxy/groups', 'proxy/select', 'proxy/ping', 'proxy/test', 'discovery/hello'] });
+	reply(200, { name: 'SIM Anywhere API', spec: SPEC, endpoints: ['status', 'history', 'cards', 'sms', 'sms/sync', 'calls', 'at', 'quota', 'push/register', 'push/status', 'proxy/status', 'proxy/groups', 'proxy/select', 'proxy/ping', 'proxy/test', 'discovery/hello'] });
 }
 if (r0 == 'status' && r1 == null) {
 	if (METHOD != 'GET') fail(405, 'method not allowed');
@@ -450,6 +482,10 @@ if (r0 == 'push' && r1 == 'status' && PATH[2] == null) {
 // Everything below needs the modem. /status above and the index stay reachable so a client
 // can see why (present: 0) instead of a bare failure.
 if (!present()) reply(503, { error: 'dongle not present', present: 0 });
+if (r0 == 'cards' && r1 == null) {
+	if (METHOD != 'GET') fail(405, 'method not allowed');
+	reply(200, cards());
+}
 if (r0 == 'history' && r1 == null) {
 	if (METHOD != 'GET') fail(405, 'method not allowed');
 	reply(200, history());
@@ -466,9 +502,9 @@ if (r0 == 'at' && r1 == null) {
 	reply(200, { command: cmd, lines: done ? slice(lines, 0, -1) : lines, result: done ? last : 'TIMEOUT' });
 }
 if (r0 == 'calls' && r1 == null) {
-	if (METHOD == 'GET') reply(200, { calls: calls() });
+	if (METHOD == 'GET') reply(200, { calls: calls(selected_card()) });
 	if (METHOD == 'DELETE') {
-		let n = rewrite_calls(call_ids(split(Q.ids ?? '', ',')));
+		let n = rewrite_calls(call_ids(split(Q.ids ?? '', ',')), selected_card());
 		if (!n) fail(404, 'call not found');
 		reply(200, { deleted: n });
 	}
@@ -482,7 +518,7 @@ if (r0 == 'sms') {
 		a.ok ? reply(200, { synced: true }) : fail(503, a.out);
 	}
 	if (METHOD == 'GET' && r1 == null) {
-		let m = messages();
+		let m = messages(selected_card());
 		if (Q.box) m = filter(m, x => x.box == Q.box);
 		reply(200, { unread: length(filter(m, x => x.box == 'in' && !x.read)), messages: m });
 	}
@@ -504,11 +540,11 @@ if (r0 == 'sms') {
 	if (METHOD == 'PATCH') {
 		let b = body();
 		if (type(b.read) != 'bool') fail(400, 'read must be boolean');
-		let n = rewrite(uids(r1 != null ? [r1] : b.ids), r => { r.read = b.read; return r; });
+		let n = rewrite(uids(r1 != null ? [r1] : b.ids), r => { r.read = b.read; return r; }, selected_card());
 		reply(200, { updated: n });
 	}
 	if (METHOD == 'DELETE') {
-		let n = rewrite(uids(r1 != null ? [r1] : split(Q.ids ?? '', ',')), r => null);
+		let n = rewrite(uids(r1 != null ? [r1] : split(Q.ids ?? '', ',')), r => null, selected_card());
 		reply(200, { deleted: n });
 	}
 	fail(405, 'method not allowed');

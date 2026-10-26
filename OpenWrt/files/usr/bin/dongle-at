@@ -14,8 +14,9 @@ AT_PORT=$(cat "$ATCACHE" 2>/dev/null)
 
 case "$1" in
   sync)
-    sms_sync ;;
+    sms_sync || { at_close; echo "SIM identity unavailable"; exit 69; } ;;
   send)
+    sms_card || { at_close; echo "SIM identity unavailable"; exit 69; }
     PDU=$2; LEN=$(( ${#PDU} / 2 - 1 ))
     case "$PDU" in 00*[!0-9A-F]*|"") at_close; echo "bad pdu"; exit 64 ;; 00*) ;; *) at_close; echo "bad pdu"; exit 64 ;; esac
     [ "$LEN" -ge 7 ] && [ "$LEN" -le 176 ] || { at_close; echo "bad pdu"; exit 64; }
@@ -27,8 +28,8 @@ case "$1" in
     at_close
     case "$R" in
       *"+CMGS:"*)
-        U=$(echo "$PDU $(date +%s)" | md5sum | cut -c1-12)
-        printf '%s\tout\t%s\t1\t%s\n' "$U" "$(date +%s)" "$PDU" >> "$SMS"
+        U=$(printf '%s %s %s' "$SMS_CARD" "$PDU" "$(date +%s)" | md5sum | cut -c1-12)
+        printf '%s\tout\t%s\t1\t%s\t%s\n' "$U" "$(date +%s)" "$PDU" "$SMS_CARD" >> "$SMS"
         echo "$U"; exit 0 ;;
       *) echo "$R" | grep ERROR | head -1; exit 70 ;;
     esac ;;

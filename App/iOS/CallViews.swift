@@ -31,16 +31,18 @@ struct PhoneView: View {
                 switch phone.wifi {
                 case "registered": Label("Wi-Fi Calling 已注册", systemImage: "wifi")
                 case "connecting": Label("Wi-Fi Calling 正在连接…", systemImage: "wifi").foregroundStyle(.secondary)
+                case "unsupported": Label("此 SIM 不支持 Wi-Fi Calling", systemImage: "wifi.slash").foregroundStyle(.secondary)
+                case "unavailable": Label("Wi-Fi Calling 不可用", systemImage: "wifi.slash").foregroundStyle(.secondary)
                 case "error": Label("Wi-Fi Calling 出错，通话改走模组", systemImage: "wifi.exclamationmark").foregroundStyle(.orange)
                 default: Label("Wi-Fi Calling 未注册", systemImage: "wifi.slash").foregroundStyle(.secondary)
                 }
                 switch phone.voipStatus {
                 case .active:
-                    Label("VoIP已生效", systemImage: "checkmark.shield.fill").foregroundStyle(.green)
+                    Label("VoIP已生效", systemImage: "iphone.gen3.radiowaves.left.and.right").foregroundStyle(.green)
                 case .ineffective:
-                    Label("VoIP 未生效，仅限App内通话", systemImage: "exclamationmark.shield.fill").foregroundStyle(.orange)
+                    Label("VoIP 未生效，仅限App内通话", systemImage: "iphone.gen3.radiowaves.left.and.right").foregroundStyle(.orange)
                 case .unconfigured:
-                    Label("VoIP未配置，仅限App内通话", systemImage: "bell.slash.fill").foregroundStyle(.secondary)
+                    Label("VoIP未配置，仅限App内通话", systemImage: "iphone.gen3.slash").foregroundStyle(.secondary)
                 }
                 Section {
                     HStack {
@@ -146,8 +148,8 @@ struct PhoneView: View {
                 await phone.refreshVoIPStatus(host: store.host)
             }
             .task(id: store.host) {
-                await store.refreshCalls()
                 while !Task.isCancelled {
+                    await store.refreshCalls()
                     await phone.refreshVoIPStatus(host: store.host)
                     try? await Task.sleep(for: .seconds(30))
                 }
@@ -159,6 +161,7 @@ struct PhoneView: View {
                 }
             }
             .onChange(of: box) { selection = [] }
+            .onChange(of: store.selectedCard) { selection = []; editMode = .inactive }
             .confirmDial($confirm)
             .confirmationDialog("确定要删除所选的 \(pendingDelete.count) 条通话记录吗？此操作不可撤销。",
                                 isPresented: .init(get: { !pendingDelete.isEmpty }, set: { if !$0 { pendingDelete = [] } }),
@@ -178,14 +181,16 @@ struct PhoneView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) {
-            Button(editMode.isEditing ? "完成" : "选择") {
+        ToolbarItemGroup(placement: .topBarLeading) {
+            SIMCardMenu()
+        }
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            Button(editMode.isEditing ? "完成" : "选择", systemImage: editMode.isEditing ? "checkmark" : "checkmark.circle") {
                 selection = []
                 editing = false
                 editMode = editMode.isEditing ? .inactive : .active
             }
-        }
-        ToolbarItemGroup(placement: .topBarTrailing) {
+            .labelStyle(.iconOnly)
             if editMode.isEditing {
                 Button("删除", systemImage: "trash", role: .destructive) { pendingDelete = Array(selection) }
                     .labelStyle(.iconOnly)

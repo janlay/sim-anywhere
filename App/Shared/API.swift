@@ -83,6 +83,18 @@ struct CallRecord: Decodable, Identifiable, Hashable, Sendable {
 
 private struct CallList: Decodable { var calls: [CallRecord] }
 
+struct SIMCard: Decodable, Identifiable, Sendable {
+    var id: String
+    var current: Bool
+    var phone_masked: String?
+
+    var title: String {
+        phone_masked ?? "号码未知"
+    }
+}
+
+struct CardList: Decodable { var current: String; var cards: [SIMCard] }
+
 enum VoIPStatus: String, Decodable, Sendable {
     case active, ineffective, unconfigured
 }
@@ -173,11 +185,13 @@ struct APIError: LocalizedError {
 
 struct DongleAPI: Sendable {
     var base: URL
+    var card: String?
 
-    init?(host: String) {
+    init?(host: String, card: String? = nil) {
         let h = host.trimmingCharacters(in: .whitespaces)
         guard !h.isEmpty, let url = URL(string: (h.contains("://") ? h : "http://" + h) + "/cgi-bin/sim-anywhere-api") else { return nil }
         base = url
+        self.card = card
     }
 
     /// The API root: the node's name, the spec path and the endpoint names. Used to confirm the API is reachable.
@@ -218,18 +232,22 @@ struct DongleAPI: Sendable {
         }
     }
 
-    func sms() async throws -> SMSList { try await call("GET", "sms") }
+    func cards() async throws -> CardList { try await call("GET", "cards") }
+
+    func sms() async throws -> SMSList { try await call("GET", "sms", query: card.map { ["card": $0] } ?? [:]) }
 
     func send(to: String, text: String, dryRun: Bool) async throws -> SendResult {
         try await call("POST", "sms", body: ["to": .s(to), "text": .s(text), "dry_run": .b(dryRun)])
     }
 
     func mark(_ ids: [String], read: Bool) async throws {
-        let _: Empty = try await call("PATCH", "sms", body: ["ids": .a(ids), "read": .b(read)])
+        let _: Empty = try await call("PATCH", "sms", query: card.map { ["card": $0] } ?? [:], body: ["ids": .a(ids), "read": .b(read)])
     }
 
     func delete(_ ids: [String]) async throws {
-        let _: Empty = try await call("DELETE", "sms", query: ["ids": ids.joined(separator: ",")])
+        var query = ["ids": ids.joined(separator: ",")]
+        if let card { query["card"] = card }
+        let _: Empty = try await call("DELETE", "sms", query: query)
     }
 
     func sync() async throws {
@@ -242,12 +260,14 @@ struct DongleAPI: Sendable {
     }
 
     func calls() async throws -> [CallRecord] {
-        let l: CallList = try await call("GET", "calls")
+        let l: CallList = try await call("GET", "calls", query: card.map { ["card": $0] } ?? [:])
         return l.calls
     }
 
     func deleteCalls(_ ids: [String]) async throws {
-        let _: Empty = try await call("DELETE", "calls", query: ["ids": ids.joined(separator: ",")])
+        var query = ["ids": ids.joined(separator: ",")]
+        if let card { query["card"] = card }
+        let _: Empty = try await call("DELETE", "calls", query: query)
     }
 
     func registerVoIPDevice(_ device: String, token: String, environment: String) async throws {
