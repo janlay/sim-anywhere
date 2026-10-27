@@ -7,7 +7,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "1.1"
+    MARKETING_VERSION: "1.5"
     CURRENT_PROJECT_VERSION: "5"
     SIM_ANYWHERE_GIT_SHORT_HASH: unknown
     SIM_ANYWHERE_BUNDLE_ID: net.janlay.simanywhere

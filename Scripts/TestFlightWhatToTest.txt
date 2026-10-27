@@ -1,1 +1,8 @@
-Feature: Display the SIM phone number in masked form.
+Feature: Incoming calls ring in the background through APNs VoIP push.
+Feature: SMS and call records are kept separately for each SIM; the SIM card menu shows masked numbers.
+Feature: Set an alias for each SIM and see the network mode (5G, LTE, 3G, 2G) on the status screen.
+Feature: New app icon.
+Fix: Unsupported Wi-Fi Calling registration is stopped, and its state is reported.
+Fix: Modem status collection is restored.
+Fix: A missing AT device no longer becomes a regular file after a USB disconnect.
+Please verify node connectivity, text messaging, incoming calls while the app is in the background, and per-SIM records.

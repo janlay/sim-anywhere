@@ -70,6 +70,7 @@ OpenWrt API 会提供模块状态、设备标识、短信和通话数据。iOS A
 ## 文档
 
 - [OpenAPI 规范](./OpenWrt/api/openapi.json)
+- [更新日志](./CHANGELOG.md)
 - [已知问题](./KNOWN-ISSUES.md)
 - [系统组件图](./Graphs/simanywhere.md) · [OpenWrt 数据流](./Graphs/openwrt-dongle.md) · [Home Assistant 数据流](./Graphs/hass.md)
 
@@ -151,6 +152,7 @@ The OpenWrt API serves module status, device identifiers, SMS, and call data. Th
 ## Documentation
 
 - [OpenAPI specification](./OpenWrt/api/openapi.json)
+- [Changelog](./CHANGELOG.md)
 - [Known issues](./KNOWN-ISSUES.md)
 - [System component diagram](./Graphs/simanywhere.md) · [OpenWrt data flow](./Graphs/openwrt-dongle.md) · [Home Assistant data flow](./Graphs/hass.md)
 
