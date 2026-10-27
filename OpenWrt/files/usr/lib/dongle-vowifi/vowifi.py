@@ -229,25 +229,12 @@ class LocalSim:
         raise SimError("modem did not register on an available PLMN")
 
     def serving_plmn(self):
-        """Read the serving PLMN as MCC+MNC without leaving COPS format changed."""
-        out = self._at("AT+COPS?", timeout=10)
-        match = re.search(r"\+COPS:\s*\d+,(\d+),", out)
+        """Read the serving PLMN as MCC+MNC from the LTE serving cell; COPS stays untouched."""
+        out = self._at('AT+QENG="servingcell"', timeout=10)
+        match = re.search(r'\+QENG:\s*"servingcell","[^"]*","LTE","[^"]*",(\d{3}),(\d{2,3}),', out)
         if not match:
             raise SimError("cannot read serving PLMN")
-        old_format = int(match.group(1))
-        try:
-            if old_format != 2:
-                result = self._at("AT+COPS=3,2", timeout=10)
-                if re.search(r"(?:^|\s)(?:ERROR|\+CME ERROR)", result):
-                    raise SimError("cannot request numeric serving PLMN")
-            out = self._at("AT+COPS?", timeout=10)
-            match = re.search(r'\+COPS:\s*\d+,\d+,"?(\d{5,6})"?', out)
-            if not match:
-                raise SimError("modem did not report numeric serving PLMN")
-            return match.group(1)
-        finally:
-            if old_format != 2:
-                self._at("AT+COPS=3,%d" % old_format, timeout=10)
+        return match.group(1) + match.group(2)
 
     def authenticate(self, rand, autn):
         ch_out = self._at('AT+CCHO="%s"' % self.aid)

@@ -33,6 +33,18 @@ at_read() {
 # 0 when the tty answers ATI with OK (session stays open on success)
 at_probe() { at_open "$1" && at_cmd ATI | grep -q '^OK$' && return 0; at_close; return 1; }
 
+# A 5G NSA response can list both LTE and NR; NR takes priority. Unknown RATs stay empty.
+at_network_mode() {
+  at_cmd 'AT+QNWINFO' | awk -F'"' '/^\+QNWINFO:/ {
+    if ($2 ~ /NR5G/) nr=1
+    else if ($2 ~ /LTE/) lte=1
+    else if ($2 ~ /WCDMA|HSDPA|HSUPA|HSPA/) umts=1
+    else if ($2 ~ /GSM|GPRS|EDGE/) gsm=1
+  } END {
+    if (nr) print "5G"; else if (lte) print "LTE"; else if (umts) print "3G"; else if (gsm) print "2G"
+  }'
+}
+
 sms_card() {
   SMS_CARD=$(at_cmd 'AT+QCCID' | sed -n 's/.*+QCCID: *\([0-9A-Fa-f]*\).*/\1/p' | head -1)
   case "$SMS_CARD" in ''|*[!0-9A-Fa-f]*) return 1 ;; esac

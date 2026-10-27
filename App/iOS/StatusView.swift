@@ -7,6 +7,9 @@ struct StatusView: View {
     @Environment(\.scenePhase) private var scenePhase
     var onConnect: () -> Void = {}
     @State private var discovery = NodeDiscovery()
+    @State private var editingSIMAlias = false
+    @State private var aliasCard: String?
+    @State private var aliasDraft = ""
 
     var body: some View {
         NavigationStack {
@@ -51,6 +54,15 @@ struct StatusView: View {
                         NavigationLink("更多") { MoreStatusPage() }
                     }
                 }
+            }
+            .alert("SIM 卡别名", isPresented: $editingSIMAlias) {
+                TextField("别名", text: $aliasDraft)
+                Button("取消", role: .cancel) { }
+                Button("保存") {
+                    if let aliasCard { store.setSIMAlias(aliasDraft, for: aliasCard) }
+                }
+            } message: {
+                Text("保存后优先显示别名，留空可清除别名。")
             }
         }
     }
@@ -140,8 +152,9 @@ struct StatusView: View {
     }
 
     private func hero(_ s: DongleStatus) -> some View {
-        let (h, title, sub) = s.verdict
+        let (h, title, sub) = s.verdict(alias: store.displayedSIMAlias(for: s.iccid))
         let color: Color = h == .good ? .green : h == .warn ? .orange : .red
+        let signal = Level.signal(s)
         return Section {
             HStack(spacing: 12) {
                 Image(systemName: h == .good ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
@@ -149,18 +162,53 @@ struct StatusView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     // Online: the green icon says it, so show only the details. Problems keep their title.
                     if h == .good {
-                        infoRow("antenna.radiowaves.left.and.right", sub).fontWeight(.medium)
+                        infoRow("antenna.radiowaves.left.and.right", sub)
+                            .fontWeight(.medium)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     } else {
                         Text(title).font(.title2.weight(.semibold))
                         Text(sub).font(.subheadline).foregroundStyle(.secondary)
                     }
-                    if s.netifd_up == 1, s.link_uptime != nil {
-                        infoRow("clock", "连续在线 \(Fmt.duration(s.link_uptime))")
-                            .foregroundStyle(.secondary).monospacedDigit()
+                    if (s.netifd_up == 1 && s.link_uptime != nil) || signal != nil {
+                        HStack {
+                            if s.netifd_up == 1, s.link_uptime != nil {
+                                infoRow("clock", "连续在线 \(Fmt.duration(s.link_uptime))")
+                                    .foregroundStyle(.secondary).monospacedDigit()
+                            }
+                            Spacer(minLength: 8)
+                            if let signal { Pill(text: "信号\(signal.label)", color: signal.color) }
+                        }
                     }
                 }
-                Spacer()
-                if let l = Level.signal(s) { Pill(text: "信号\(l.label)", color: l.color) }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .contentShape(.rect)
+            .contextMenu {
+                if h == .good { simAliasActions(s) }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityActions {
+                if h == .good { simAliasActions(s) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func simAliasActions(_ s: DongleStatus) -> some View {
+        if let iccid = s.iccid, !iccid.isEmpty {
+            if store.simAliases[iccid] != nil {
+                if store.displayedSIMAlias(for: iccid) != nil {
+                    Button("显示手机号", systemImage: "phone") { store.showSIMAlias(false, for: iccid) }
+                        .disabled(s.phone_masked == nil)
+                } else {
+                    Button("显示 SIM 卡别名", systemImage: "tag") { store.showSIMAlias(true, for: iccid) }
+                }
+            }
+            Button(store.simAliases[iccid] == nil ? "设置 SIM 卡别名" : "编辑 SIM 卡别名", systemImage: "pencil") {
+                aliasCard = iccid
+                aliasDraft = store.simAliases[iccid] ?? ""
+                editingSIMAlias = true
             }
         }
     }
@@ -345,10 +393,10 @@ private struct QuotaRow: View {
 }
 
 /// Usage bar with a marker for the usage projected at the end of the period and, when the
-/// cycle is capped below the plan, a red nosign at the cutoff. The fill is blue below 80% of
+/// cycle is capped below the plan, a white minus.diamond at the cutoff. The fill is blue below 80% of
 /// the cutoff, orange below 100% and red above; the forecast marker is green below 80%,
 /// yellow below 100% and red above, pinned to the right end when over. Markers are as tall
-/// as the bar, with a background gap on each side, and the nosign icon is one bar tall.
+/// as the bar, with a background gap on each side, and the minus.diamond icon is one bar tall.
 private struct QuotaBar: View {
     let fraction: Double
     let forecast: Double?
@@ -374,6 +422,12 @@ private struct QuotaBar: View {
                     }
                     let tickX = forecast.map { markerX($0, width: size.width, inset: tick / 2) }
                     let stopX = stop.map { markerX($0, width: size.width, inset: height / 2) }
+                    if let x = stopX {
+                        ctx.blendMode = .destinationOut
+                        ctx.fill(Path(CGRect(x: x, y: 0, width: size.width - x, height: size.height)),
+                                 with: .color(.black.opacity(0.75)))
+                        ctx.blendMode = .normal
+                    }
                     let cuts = [tickX.map { cut($0, width: tick) }, stopX.map { cut($0, width: height) }]
                         .compactMap { $0 }
                     if !cuts.isEmpty {
@@ -391,9 +445,9 @@ private struct QuotaBar: View {
                 }
                 .frame(width: w, height: height)
                 if let stop {
-                    Image(systemName: "nosign")
+                    Image(systemName: "minus.diamond")
                         .font(.system(size: height, weight: .bold))
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.white)
                         .frame(width: height, height: height)
                         .offset(x: markerX(stop, width: w, inset: height / 2) - height / 2)
                 }

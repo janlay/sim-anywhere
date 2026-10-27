@@ -1,11 +1,7 @@
-build/
-SIMAnywhere.xcodeproj/
-SIM Anywhere.xcodeproj/
 xcuserdata/
-.workbuddy-ai/
-/.env
-**/.env
 **/__pycache__/
 *.py[cod]
 **/PRD.md
 **/ARCH.md
+/Documents/
+SIM Anywhere.xcodeproj

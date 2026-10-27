@@ -86,6 +86,29 @@ final class Store {
     var currentCard: String?
     var selectedCard: String?
 
+    private(set) var simAliases: [String: String] = UserDefaults.standard.dictionary(forKey: "simAliases") as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(simAliases, forKey: "simAliases") }
+    }
+    private(set) var phoneDisplaySIMs = Set(UserDefaults.standard.stringArray(forKey: "phoneDisplaySIMs") ?? []) {
+        didSet { UserDefaults.standard.set(phoneDisplaySIMs.sorted(), forKey: "phoneDisplaySIMs") }
+    }
+
+    func displayedSIMAlias(for iccid: String?) -> String? {
+        guard let iccid, !phoneDisplaySIMs.contains(iccid) else { return nil }
+        return simAliases[iccid]
+    }
+
+    func setSIMAlias(_ alias: String, for iccid: String) {
+        let name = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        simAliases[iccid] = name.isEmpty ? nil : name
+        phoneDisplaySIMs.remove(iccid)
+    }
+
+    func showSIMAlias(_ show: Bool, for iccid: String) {
+        if show { phoneDisplaySIMs.remove(iccid) }
+        else { phoneDisplaySIMs.insert(iccid) }
+    }
+
     var proxyGroups: ProxyGroups?
     var proxyError: String?
     var exitDelay: Int?          // latest delay of the 4G exit proxy; nil when unknown or unavailable
@@ -376,14 +399,14 @@ extension Level: Comparable {
 enum Health { case good, warn, crit }
 
 extension DongleStatus {
-    var verdict: (Health, String, String) {
+    func verdict(alias: String? = nil) -> (Health, String, String) {
         if present != 1 { return (.crit, "未检测到 Dongle", "USB 2ca3:4006 不在总线上") }
         if sim == "no_sim" { return (.crit, "未插 SIM 卡", "模组在线，但读不到 SIM") }
         if sim == "locked" { return (.crit, "SIM 已锁定", "需要输入 PIN / PUK") }
         if netifd_up != 1 { return (.crit, "链路中断", "usb0 接口未建立 (netifd down)") }
         if at_port == nil { return (.warn, "在线 · 无模组数据", "串口未就绪，无法读取 AT 信息") }
         if reg != 1 && reg != 5 { return (.warn, "网络注册异常", "CEREG 状态 \(reg.map(String.init) ?? "—")") }
-        let sub = [phone_masked, Fmt.oper(oper)]
+        let sub = [alias ?? phone_masked, Fmt.oper(oper), network_mode]
         return (.good, "在线", sub.compactMap { $0 }.joined(separator: " · "))
     }
 }

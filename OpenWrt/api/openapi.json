@@ -1396,6 +1396,12 @@
       ],
       "description": "SIM IMSI (AT+CIMI)"
      },
+     "network_mode": {
+      "type": ["string", "null"],
+      "enum": ["2G", "3G", "LTE", "5G", null],
+      "description": "Current access technology from AT+QNWINFO. NR takes precedence in dual LTE/NR responses. Null when unavailable. Does not infer 5G-Advanced from ordinary NR service.",
+      "example": "LTE"
+     },
      "phone_masked": {
       "type": [
        "string",

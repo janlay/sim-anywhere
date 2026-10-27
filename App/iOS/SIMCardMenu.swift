@@ -6,7 +6,7 @@ struct SIMCardMenu: View {
     var body: some View {
         Menu {
             ForEach(store.cards) { card in
-                Button(card.title, systemImage: store.selectedCard == card.id ? "checkmark.circle.fill" : "simcard") {
+                Button(store.simAliases[card.id] ?? card.title, systemImage: store.selectedCard == card.id ? "checkmark.circle.fill" : "simcard") {
                     Task { await store.selectCard(card.id) }
                 }
             }

@@ -8,7 +8,7 @@ struct DongleStatus: Decodable, Sendable {
     var present: Int?
     var usb_port, at_port, model, imei, iccid, imsi, sim: String?
     var rssi, rsrp, rsrq, sinr, reg, temp: Int?
-    var oper, band, rrc, cellid, pci, earfcn, apn: String?
+    var oper, network_mode, band, rrc, cellid, pci, earfcn, apn: String?
     var phone_masked: String?    // already masked by the node; no plaintext own number in the HTTP API
     var wan_ip, wan_ip6, dns, usb0_ip, host_ip: String?
     var usb0_carrier: Int?

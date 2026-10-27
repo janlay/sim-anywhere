@@ -53,7 +53,7 @@ if [ -n "$USBDEV" ]; then
 fi
 
 SIM=""; RSSI=""; RSRP=""; RSRQ=""; SINR=""; REG=""; TEMP=""; OPER=""; BAND=""
-RRC=""; CELLID=""; PCI=""; EARFCN=""; MODEL=""; APN=""; WIP=""; WIP6=""; DNS=""
+RRC=""; CELLID=""; PCI=""; EARFCN=""; MODEL=""; APN=""; WIP=""; WIP6=""; DNS=""; NETWORK_MODE=""
 IMEI=""; ICCID=""; IMSI=""; MSISDN=""
 if [ -n "$AT_PORT" ]; then
   MODEL=$(at_cmd ATI | grep -vE '^(OK|ERROR)$' | tr '\n' ' ' | sed 's/Revision: //; s/ *$//')
@@ -90,6 +90,7 @@ if [ -n "$AT_PORT" ]; then
   TEMP=$(at_cmd 'AT+QTEMP' | sed -n 's/.*+QTEMP: *\(.*\)/\1/p' | tr ',' '\n' | sort -n | tail -1)
   # operator name
   OPER=$(at_cmd 'AT+COPS?' | sed -n 's/.*"\(.*\)".*/\1/p' | tr ' ,' '__')
+  NETWORK_MODE=$(at_network_mode)
   # PDN context: APN, carrier-assigned addresses, DNS (IPv6 comes as 16 dotted bytes)
   eval "$(at_cmd 'AT+CGCONTRDP=1' | awk -F'[, ]+' '/^\+CGCONTRDP:/ && !done {done=1; apn=$4
     for (i = 5; i <= NF; i++) { n = split($i, p, ".")
@@ -126,7 +127,7 @@ js() { [ -n "$1" ] && echo "\"$1\"" || echo null; }
 cat > "$WEB/status.json.tmp" <<JSON
 {"ts":"$TS","epoch":$NOW,"present":$PRESENT,"usb_port":$(js "$PORT"),"at_port":$(js "$AT_PORT"),"model":$(js "$MODEL"),"imei":$(js "$IMEI"),"iccid":$(js "$ICCID"),"imsi":$(js "$IMSI"),"msisdn":$(js "$MSISDN"),
 "sim":$(js "$SIM"),"rssi":$(jn "$RSSI"),"rsrp":$(jn "$RSRP"),"rsrq":$(jn "$RSRQ"),"sinr":$(jn "$SINR"),
-"reg":$(jn "$REG"),"temp":$(jn "$TEMP"),"oper":$(js "$OPER"),"band":$(js "$BAND"),
+"reg":$(jn "$REG"),"temp":$(jn "$TEMP"),"oper":$(js "$OPER"),"network_mode":$(js "$NETWORK_MODE"),"band":$(js "$BAND"),
 "rrc":$(js "$RRC"),"cellid":$(js "$CELLID"),"pci":$(js "$PCI"),"earfcn":$(js "$EARFCN"),
 "apn":$(js "$APN"),"wan_ip":$(js "$WIP"),"wan_ip6":$(js "$WIP6"),"dns":$(js "$DNS"),
 "usb0_dev":$(js "$U"),"usb0_carrier":$(jn "$CARRIER"),"usb0_ip":$(js "$UIP"),"rx":$(jn "$RX"),"tx":$(jn "$TX"),"link_uptime":$(jn "$LINKUP"),
