@@ -13,10 +13,10 @@ The payload is one JSON datagram:
 `model` (the 4G dongle reported by `ATI`, the same value the API serves under
 `/status`) is included only when a dongle is inserted; it is omitted otherwise.
 
-It goes to the broadcast address of every LAN interface every INTERVAL seconds,
+It goes to the broadcast address of the LAN interface every INTERVAL seconds,
 and back to any client that sends {"simanywhere": 1, "probe": 1} to the port, so
-the app does not have to wait for the next broadcast. The 4G uplink (usb0) and
-loopback are never announced: they are not reachable from the LAN.
+the app does not have to wait for the next broadcast. The LAN interface is the
+device of the firewall zone `lan`; without one, the first eth* device is used.
 
 With `stop_on_connect` the node stops announcing after an app has connected (the
 API calls `pause`), and stays quiet until `resume` (the LuCI button) or the next
@@ -52,7 +52,6 @@ PAUSE = "/var/run/dongle-announce.paused"
 STOP = "/var/run/dongle-announce.stopped"
 
 ADDR_RE = re.compile(r"^\d+:\s+(\S+)\s+inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)")
-SKIP_DEV = re.compile(r"^(lo|usb\d+)$")
 TRUE = ("1", "true", "on", "yes")
 
 
@@ -157,16 +156,31 @@ def broadcast(ip, prefix):
     return int_ip(ip_int(ip) | (~mask_of(prefix) & 0xFFFFFFFF))
 
 
+def lan_device():
+    """The device of the firewall zone named `lan`, else the first eth* device."""
+    i = 0
+    while name := uci(f"firewall.@zone[{i}].name"):
+        if name == "lan":
+            for net in uci(f"firewall.@zone[{i}].network").split():
+                dev = uci(f"network.{net}.device") or uci(f"network.{net}.ifname")
+                if dev:
+                    return dev
+        i += 1
+    eth = sorted(d for d in os.listdir("/sys/class/net") if d.startswith("eth"))
+    return eth[0] if eth else ""
+
+
 def lan_addrs():
-    """(device, ip, prefix) of every IPv4 address that is not loopback or the dongle.
+    """(device, ip, prefix) of the LAN device's IPv4 address.
 
     Secondary addresses are skipped so the same node is not announced twice
     when a virtual address is configured.
     """
+    dev = lan_device()
     out = []
-    for line in run(["ip", "-4", "-o", "addr", "show"]).splitlines():
+    for line in run(["ip", "-4", "-o", "addr", "show", "dev", dev]).splitlines() if dev else []:
         m = ADDR_RE.match(line)
-        if not m or SKIP_DEV.match(m.group(1)) or " secondary " in line:
+        if not m or " secondary " in line:
             continue
         out.append((m.group(1), m.group(2), int(m.group(3))))
     return out

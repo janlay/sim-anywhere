@@ -376,7 +376,7 @@ def amr_payload_be(frame):
     return v.to_bytes((total + pad) // 8, "big")
 
 
-def build_rtcp_sr(ssrc, rtp_ts, packet_count, octet_count, cname="vowifi@sim-anywhere"):
+def build_rtcp_sr(ssrc, rtp_ts, packet_count, octet_count, cname="vowifi@" + socket.gethostname()):
     ntp = time.time() + 2208988800
     sec = int(ntp)
     frac = int((ntp - sec) * (1 << 32)) & 0xFFFFFFFF
