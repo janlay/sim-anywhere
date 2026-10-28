@@ -41,6 +41,7 @@ final class CallSession: NSObject {
     /// Wi-Fi Calling registration on the node: registered, connecting, error or off. Nil from a node without Wi-Fi Calling.
     var wifi: String?
     var voipStatus: VoIPStatus = .ineffective
+    var voipStatusMessage = "正在查询本机的来电推送状态。"
     /// Counts ended calls, so views can reload the call log.
     var ended = 0
     private(set) var muted = false
@@ -86,7 +87,10 @@ final class CallSession: NSObject {
     func update(host: String, active: Bool) {
         push?.sync(host: host)
         let u = DongleAPI(host: host)?.callURL
-        if u != url { voipStatus = .ineffective }
+        if u != url {
+            voipStatus = .ineffective
+            voipStatusMessage = "节点已切换，正在查询本机的来电推送状态。"
+        }
         self.active = active
         want = active || inCall || awaitingPush != nil || pendingDecline != nil
         if u != url {
@@ -104,17 +108,28 @@ final class CallSession: NSObject {
         guard let api = DongleAPI(host: host), let push,
               let bundleID = Bundle.main.bundleIdentifier else {
             voipStatus = .ineffective
+            voipStatusMessage = "尚未连接有效节点或无法读取本机注册信息。"
             return
         }
-        let status = (try? await api.voipStatus(device: push.statusDeviceID,
-                                               bundleID: bundleID,
-                                               environment: push.statusEnvironment)) ?? .ineffective
-        if api.callURL == url { voipStatus = status }
+        do {
+            let status = try await api.voipStatus(device: push.statusDeviceID,
+                                                  bundleID: bundleID,
+                                                  environment: push.statusEnvironment)
+            guard api.callURL == url else { return }
+            voipStatus = status.state
+            voipStatusMessage = status.message
+        } catch {
+            guard api.callURL == url else { return }
+            voipStatus = .ineffective
+            voipStatusMessage = "无法查询节点的来电推送状态：\(error.localizedDescription)"
+        }
     }
 
     private func run() async {
         while want, let url {
-            let t = URLSession.shared.webSocketTask(with: url)
+            var request = URLRequest(url: url)
+            request.setValue(push?.statusDeviceID, forHTTPHeaderField: "X-SIM-Device")
+            let t = URLSession.shared.webSocketTask(with: request)
             task = t
             t.resume()
             do {

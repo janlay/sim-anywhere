@@ -17,6 +17,7 @@ VID, PID = '2ca3', '4006'
 PORT = 8765
 LOG = '/root/dongle-calls.tsv'
 CALLS_LOCK = '/var/lock/dongle-calls.lock'
+PUSH_DEVICES = '/root/sim-anywhere-voip-tokens.json'
 MAXLOG = 1000
 NUMBER = re.compile(r'^\+?[0-9]{1,20}$')
 DTMF = re.compile(r'^[0-9*#A-D]{1,32}$')
@@ -269,6 +270,7 @@ class Call:
         self.call_id = None
         self.card = None
         self.pushed = False
+        self.recipient = None
         self.since = self.active_since = None
         self.owner = None
         self.grace = 0
@@ -277,20 +279,38 @@ class Call:
         self.wifi_down = self.wifi_up = 0   # PCM frames relayed to and from the owner
 
     def view(self, c):
-        return {'type': 'state', 'ready': modem.ready() or wifi.registered(), 'state': self.state, 'dir': self.dir,
+        event = {'type': 'state', 'ready': modem.ready() or wifi.registered(), 'state': self.state, 'dir': self.dir,
                 'call_id': self.call_id,
                 'number': self.number, 'since': self.since, 'active_since': self.active_since,
                 'owner': c is not None and c is self.owner, 'reason': self.reason,
                 'path': 'wifi' if self.wifi or (self.state == 'idle' and wifi.registered()) else 'modem',
                 'wifi': wifi.state or 'off'}
+        if (c is not None and self.dir == 'in' and self.recipient is not None
+                and getattr(c, 'device_id', None) != self.recipient):
+            event.update(state='idle', dir=None, call_id=None, number=None, since=None,
+                         active_since=None, owner=False, reason=None)
+        return event
 
     def notify(self):
+        if self.state == 'incoming' and self.call_id and not self.pushed:
+            # Freeze routing for this call. A selection change applies to the next call.
+            try:
+                with open(PUSH_DEVICES) as source:
+                    devices = json.load(source)
+                self.recipient = next((d['device'] for d in devices if d.get('selected') is True), '')
+                if devices and all(not d.get('bundle_id') or not d.get('team_id') for d in devices):
+                    self.recipient = None  # keep legacy foreground calls until app metadata is upgraded
+            except FileNotFoundError:
+                self.recipient = None  # foreground calls before the first push registration
+            except (OSError, ValueError, KeyError, TypeError):
+                self.recipient = ''
+
         for c in list(clients):
             c.text(self.view(c))
         if self.state == 'incoming' and self.call_id and not self.pushed:
             self.pushed = True
             try:
-                subprocess.Popen(['/usr/bin/sim-anywhere-push', self.call_id],
+                subprocess.Popen(['/usr/bin/sim-anywhere-push', self.call_id, self.recipient or ''],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except OSError as e:
                 log('VoIP push unavailable', e)
@@ -400,6 +420,9 @@ class Call:
     def op(self, c, m):
         o = m.get('op')
         log('op', c.addr[0], json.dumps(m, ensure_ascii=False))
+        if (o in ('answer', 'hangup') and self.dir == 'in' and self.state != 'idle'
+                and self.recipient is not None and getattr(c, 'device_id', None) != self.recipient):
+            return c.error('incoming call belongs to another device')
         n = re.sub(r'[ -]', '', str(m.get('number', '')))
         if o == 'dial':
             if not NUMBER.match(n):
@@ -664,6 +687,7 @@ class Client:
         self.s, self.addr = s, addr
         self.inb, self.out = b'', b''
         self.up = False
+        self.device_id = None
         self.frag = None
         self.seen = time.time()
         s.setblocking(False)
@@ -711,6 +735,10 @@ class Client:
         # browsers always send Origin; only the node's own pages may connect (blocks cross-site WebSocket use)
         if origin and re.sub(r'^https?://', '', origin).split(':')[0].split('/')[0] != host:
             return self.reject('403 Forbidden')
+        device_id = h.get('x-sim-device', '')
+        if device_id and not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', device_id):
+            return self.reject('400 Bad Request')
+        self.device_id = device_id or None
         acc = base64.b64encode(hashlib.sha1(key.encode() + WS_GUID).digest()).decode()
         self.raw(('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
                   'Sec-WebSocket-Accept: %s\r\n\r\n' % acc).encode())

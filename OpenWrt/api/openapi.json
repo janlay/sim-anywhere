@@ -676,7 +676,7 @@
     ],
     "summary": "Register a device for incoming VoIP call pushes",
     "operationId": "registerVoIPDevice",
-    "description": "Stores one VoIP token per stable device id. The token is never returned by the API. At most eight devices can be registered. This endpoint uses the same trusted-LAN access model as the rest of the API.",
+    "description": "Register a VoIP token and app-reported device metadata on the trusted LAN. The node checks Bundle ID, team ID, environment and token format against its APNs configuration. Matching metadata does not prove token ownership, signing identity or delivery. When no device is selected, the first complete registration is selected for call routing. LuCI can change the selected recipient; the choice applies from the next incoming call. Registrations without metadata remain visible but cannot receive VoIP pushes until updated.",
     "requestBody": {
      "required": true,
      "content": {
@@ -703,6 +703,36 @@
            "development",
            "production"
           ]
+         },
+         "bundle_id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$"
+         },
+         "team_id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[A-Z0-9]{10}$"
+         },
+         "name": {
+          "type": "string",
+          "maxLength": 128
+         },
+         "model": {
+          "type": "string",
+          "maxLength": 128
+         },
+         "os_version": {
+          "type": "string",
+          "maxLength": 128
+         },
+         "app_version": {
+          "type": "string",
+          "maxLength": 128
+         },
+         "app_build": {
+          "type": "string",
+          "maxLength": 128
          }
         }
        }
@@ -763,7 +793,7 @@
     ],
     "summary": "Check VoIP push readiness for one app device",
     "operationId": "getVoIPStatus",
-    "description": "Returns unconfigured when APNs identifiers or key are missing. Returns ineffective when the key cannot sign, the app Bundle ID does not match, the device token is absent, or APNs has not accepted a real incoming-call push for the current configuration and token. Active means APNs accepted the most recent real push for this device; it does not guarantee delivery to the phone. No key or token is returned.",
+    "description": "Returns unconfigured when APNs identifiers or key are missing. Returns pending when the registration matches the configuration and APNs has not yet accepted a real incoming-call push. Returns ineffective when the key cannot sign, app metadata does not match, this device is not selected, its token is missing or expired, or APNs rejected the push. Active means APNs accepted the most recent real push for this selected device; it does not guarantee delivery. No key or token is returned. Optional reason and apns_code fields explain configuration, registration, selection, validation, and delivery failures.",
     "parameters": [
      {
       "name": "device",
@@ -810,9 +840,18 @@
            "type": "string",
            "enum": [
             "active",
+            "pending",
             "ineffective",
             "unconfigured"
            ]
+          },
+          "reason": {
+           "type": "string",
+           "description": "Stable reason code for the current device push state."
+          },
+          "apns_code": {
+           "type": "integer",
+           "description": "Most recent APNs HTTP status for this configuration; zero means a connection failure."
           }
          }
         }
@@ -1206,7 +1245,10 @@
               "type": "boolean"
              },
              "phone_masked": {
-              "type": ["string", "null"],
+              "type": [
+               "string",
+               "null"
+              ],
               "description": "Masked own number for the current SIM when available; null for historical and unrecognized groups. No plaintext own number is returned."
              }
             }
@@ -1397,8 +1439,17 @@
       "description": "SIM IMSI (AT+CIMI)"
      },
      "network_mode": {
-      "type": ["string", "null"],
-      "enum": ["2G", "3G", "LTE", "5G", null],
+      "type": [
+       "string",
+       "null"
+      ],
+      "enum": [
+       "2G",
+       "3G",
+       "LTE",
+       "5G",
+       null
+      ],
       "description": "Current access technology from AT+QNWINFO. NR takes precedence in dual LTE/NR responses. Null when unavailable. Does not infer 5G-Advanced from ordinary NR service.",
       "example": "LTE"
      },

@@ -23,6 +23,10 @@ function getStatus() {
 	return fs.exec_direct('/usr/bin/dongle-status', [ 'status' ], 'json');
 }
 
+function getPushDevices() {
+	return fs.exec_direct('/usr/bin/dongle-status', [ 'push-devices' ], 'json');
+}
+
 function getClash() {
 	return fs.exec_direct('/usr/bin/dongle-clash', [ 'status' ], 'json');
 }
@@ -125,6 +129,66 @@ function clientRows(list) {
 	});
 }
 
+function pushDeviceTable(data, refresh) {
+	if (!data || data.error)
+		return E('p', { 'class': 'alert-message warning' }, _('手机注册状态读取失败，请检查来电推送服务是否已更新安装。'));
+	var reasons = {
+		unconfigured: _('APNs 未配置或密钥不可用'),
+		signing_unavailable: _('节点当前不具备 APNs 签名能力'),
+		missing_metadata: _('缺少注册信息，请更新并打开 App'),
+		bundle_mismatch: _('Bundle ID 不匹配'),
+		team_mismatch: _('签名团队不匹配'),
+		invalid_environment: _('推送环境无效'),
+		invalid_token: _('设备 token 无效'),
+		token_expired: _('APNs 已注销 token，请等待手机更新注册')
+	};
+	var devices = data.devices || [];
+	var rows = devices.map(function(d) {
+		var state = d.state === 'accepted' ? _('APNs 已接受真实来电推送')
+			: d.state === 'pending' ? _('配置匹配，待真实来电验证')
+			: d.state === 'rejected' ? (d.apns_code ? _('APNs 拒绝：HTTP %s').format(d.apns_code) : _('推送连接失败'))
+			: (reasons[d.reason] || _('注册无效'));
+		var select = E('button', {
+			'class': 'btn cbi-button cbi-button-action',
+			'disabled': d.selected || d.state === 'invalid',
+			'click': ui.createHandlerFn(null, function() {
+				return fs.exec_direct('/usr/bin/sim-anywhere-push', [ 'select', d.device ], 'json')
+					.then(function(r) {
+						if (!r || !r.ok) throw new Error(_('切换失败，请刷新设备状态'));
+						return refresh();
+					}).catch(function(err) { ui.addNotification(null, E('p', String(err)), 'error'); });
+			})
+		}, d.selected ? _('当前接收设备') : _('设为接收设备'));
+		var remove = E('button', {
+			'class': 'btn cbi-button cbi-button-remove',
+			'style': 'margin-left: 6px',
+			'click': ui.createHandlerFn(null, function() {
+				if (!confirm(_('移除后该手机不再接收来电通知，直到它重新注册。确定移除？')))
+					return;
+				return fs.exec_direct('/usr/bin/sim-anywhere-push', [ 'remove', d.device ], 'json')
+					.then(function(r) {
+						if (!r || !r.ok) throw new Error(_('移除失败，请刷新设备状态'));
+						return refresh();
+					}).catch(function(err) { ui.addNotification(null, E('p', String(err)), 'error'); });
+			})
+		}, _('移除'));
+		return E('tr', { 'class': 'tr' }, [
+			E('td', { 'class': 'td' }, d.name || d.model || _('手机')),
+			E('td', { 'class': 'td' }, (d.model || '-') + ' / iOS ' + (d.os_version || '-')),
+			E('td', { 'class': 'td' }, [ E('div', {}, [
+					d.matched ? E('span', { 'style': 'color: #2e7d32', 'title': _('与节点配置匹配') }, '✓ ') : '',
+					(d.app_version || '-') + ' (' + (d.app_build || '-') + ')' ]),
+				E('small', {}, d.environment || '-') ]),
+			E('td', { 'class': 'td' }, state),
+			E('td', { 'class': 'td' }, formatTime(d.updated_at)),
+			E('td', { 'class': 'td' }, [ select, remove ])
+		]);
+	});
+	if (!rows.length)
+		rows.push(E('tr', { 'class': 'tr' }, E('td', { 'class': 'td', 'colspan': 6 }, _('尚无手机注册，请打开 App 并连接节点'))));
+	return table([ _('手机'), _('机型 / 系统'), _('App / 注册信息'), _('验证状态'), _('最近注册'), _('来电接收') ], rows);
+}
+
 function netText(net, present) {
 	if (!present)
 		return '-';
@@ -184,11 +248,11 @@ function table(head, rows) {
 
 return view.extend({
 	load: function() {
-		return Promise.all([ getStatus(), getClash() ]);
+		return Promise.all([ getStatus(), getClash(), getPushDevices() ]);
 	},
 
 	render: function(res) {
-		var st = res[0], clash = res[1];
+		var st = res[0], clash = res[1], pushDevices = res[2];
 		var box = E('div', {}, []);
 
 		// 出口 IP and 网络延迟 hit the internet over the modem, so they are never part of
@@ -213,12 +277,12 @@ return view.extend({
 
 			function store(cmd, r) {
 				if (cmd === 'egress-ip') egress = r; else latency = r;
-				draw(st, clash);
+				draw(st, clash, pushDevices);
 			}
 
 			function run(cmd) {
 				if (cmd === 'egress-ip') egress = { pending: true }; else latency = { pending: true };
-				draw(st, clash);
+				draw(st, clash, pushDevices);
 				return fs.exec_direct('/usr/bin/dongle-status', [ cmd ], 'json').then(function(r) {
 					store(cmd, r || { ok: false, error: '无返回' });
 				}, function(err) {
@@ -230,16 +294,21 @@ return view.extend({
 		})();
 
 		function refresh() {
-			return Promise.all([ getStatus(), getClash() ]).then(function(r) {
-				draw(r[0], r[1]);
+			return Promise.all([ getStatus(), getClash(), getPushDevices() ]).then(function(r) {
+				st = r[0]; clash = r[1]; pushDevices = r[2];
+				draw(st, clash, pushDevices);
 			});
 		}
 
-		function draw(data, clashState) {
+		function draw(data, clashState, devices) {
 			var services = data.services.map(function(s) { return serviceRow(s, refresh); });
 
 			box.innerHTML = '';
 			box.appendChild(deviceStatus(data, tests));
+			box.appendChild(E('h3', {}, _('来电接收手机')));
+			box.appendChild(E('p', { 'class': 'cbi-value-description' },
+				_('切换从下一通来电开始生效，前台和后台均只通知所选手机。配置匹配仍然需要真实来电验证。')));
+			box.appendChild(pushDeviceTable(devices, refresh));
 			box.appendChild(E('h3', {}, _('Clash 集成 (mihomo/clash)')));
 			box.appendChild(clashTable(clashState));
 			box.appendChild(E('h3', {}, _('服务')));
@@ -253,7 +322,7 @@ return view.extend({
 			box.appendChild(table([ _('IP'), _('连接数') ], clientRows(data.clients.calls)));
 		}
 
-		draw(st, clash);
+		draw(st, clash, pushDevices);
 		poll.add(refresh, 10);
 
 		// First measurement right away, so the rows are not empty when the page opens.

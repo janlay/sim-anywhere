@@ -105,13 +105,29 @@ function push_register() {
 	if (METHOD == 'POST' && (type(b.token) != 'string' || length(b.token) < 32 || length(b.token) > 256 || !match(b.token, /^[0-9a-f]+$/)
 		|| (b.environment != 'development' && b.environment != 'production')))
 		fail(400, 'invalid VoIP token');
+	if (METHOD == 'POST') {
+		for (let field in [ 'bundle_id', 'team_id', 'name', 'model', 'os_version', 'app_version', 'app_build' ]) {
+			if (b[field] != null && (type(b[field]) != 'string' || length(b[field]) > 128
+				|| match(b[field], /[[:cntrl:]]/))) fail(400, 'invalid device metadata');
+		}
+		if (b.bundle_id != null && !match(b.bundle_id, /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/))
+			fail(400, 'invalid bundle id');
+		if (b.team_id != null && !match(b.team_id, /^[A-Z0-9]{10}$/)) fail(400, 'invalid team id');
+	}
 	let lock = fs.open(PUSH_LOCK, 'w');
 	lock.lock('x');
 	let devices = json(fs.readfile(PUSH_TOKENS) || '[]');
+	let previous = filter(devices, d => d.device == b.device)[0];
+	let unselected = length(filter(devices, d => d.selected == true)) == 0;
 	devices = filter(devices, d => d.device != b.device);
 	if (METHOD == 'POST') {
 		if (length(devices) >= 8) { lock.close(); fail(503, 'device limit reached'); }
-		push(devices, { device: b.device, token: b.token, environment: b.environment });
+		let entry = { device: b.device, token: b.token, environment: b.environment,
+			updated_at: time(), selected: (previous && previous.selected == true) ||
+				(unselected && b.bundle_id != null && b.team_id != null) };
+		for (let field in [ 'bundle_id', 'team_id', 'name', 'model', 'os_version', 'app_version', 'app_build' ])
+			if (b[field] != null) entry[field] = b[field];
+		push(devices, entry);
 	}
 	fs.writefile(PUSH_TOKENS + '.tmp', sprintf('%J', devices));
 	fs.chmod(PUSH_TOKENS + '.tmp', 0o600);
@@ -475,7 +491,7 @@ if (r0 == 'push' && r1 == 'status' && PATH[2] == null) {
 	let p = fs.popen('/usr/bin/sim-anywhere-push status ' + sq(device) + ' ' + sq(bundle) + ' ' + sq(environment));
 	let out = trim(p.read('all') || ''), rc = p.close(), state = null;
 	try { state = json(out); } catch (e) {}
-	if (rc != 0 || type(state) != 'object' || !match(state.state ?? '', /^(active|ineffective|unconfigured)$/))
+	if (rc != 0 || type(state) != 'object' || !match(state.state ?? '', /^(active|pending|ineffective|unconfigured)$/))
 		fail(502, 'VoIP status helper failed');
 	reply(200, state);
 }

@@ -1,3 +1,6 @@
+# Maintainer and builder values (Team ID, Bundle ID, device, profile, App Store Connect keys) live in Local.mk.
+-include Local.mk
+
 PROJECT := SIM Anywhere.xcodeproj
 SCHEME := SIMAnywhere
 BUNDLE_ID ?= net.janlay.simanywhere
@@ -8,7 +11,7 @@ DEBUG_PROFILE ?=
 DEBUG_PROFILE_FLAGS = $(if $(DEBUG_PROFILE),CODE_SIGN_STYLE=Manual PROVISIONING_PROFILE_SPECIFIER='$(DEBUG_PROFILE)')
 RELEASE_DESTINATION ?= generic/platform=iOS
 RELEASE_SIGNING ?= YES
-BUILD_ROOT ?= /Volumes/SanDisk/tmp/sim-anywhere
+BUILD_ROOT ?= build
 ARCHIVE_DIR ?= $(HOME)/Library/Developer/Xcode/Archives/SIMAnywhere
 BUILD_NUMBER := $(shell sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION:[[:space:]]*"?([0-9]+)"?.*/\1/p' project.yml | head -1)
 ARCHIVE_PATH := $(ARCHIVE_DIR)/SIMAnywhere-$(BUILD_NUMBER).xcarchive

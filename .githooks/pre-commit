@@ -1,0 +1,16 @@
+#!/bin/sh
+# Block commits that contain secrets or local-only files.
+# Enable once per clone: git config core.hooksPath .githooks
+set -e
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+	echo "pre-commit: gitleaks is not installed. Install it with: brew install gitleaks" >&2
+	exit 1
+fi
+
+if git diff --cached --name-only | grep -E '(^|/)(Local\.mk|[^/]*\.(p8|mobileprovision|ipa|xcarchive))$' >/dev/null; then
+	echo "pre-commit: local-only file is staged. Unstage it with: git rm --cached <file>" >&2
+	exit 1
+fi
+
+gitleaks git --staged --pre-commit --redact --no-banner

@@ -5,3 +5,9 @@ xcuserdata/
 **/ARCH.md
 /Documents/
 SIM Anywhere.xcodeproj
+/Local.mk
+/build/
+*.p8
+*.mobileprovision
+*.ipa
+*.xcarchive

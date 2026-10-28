@@ -1,0 +1,19 @@
+# Copy to Local.mk and fill in your values. Local.mk is ignored by Git.
+
+# Apple Developer Team ID (10 characters, Membership details page)
+TEAM_ID = ABCDE12345
+# Unique Bundle ID registered for your team with Push Notifications enabled
+BUNDLE_ID = com.example.simanywhere
+
+# Build output directory (default: build/)
+# BUILD_ROOT = /path/outside/repo
+
+# Device build (make debug)
+DEBUG_SIGNING = YES
+DEBUG_DESTINATION = platform=iOS,id=YOUR_DEVICE_UDID
+# Optional: explicit provisioning profile name with Push Notifications
+DEBUG_PROFILE =
+
+# TestFlight upload (make upload, make testflight)
+ASC_KEY_ID =
+ASC_ISSUER_ID =

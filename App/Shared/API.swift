@@ -96,10 +96,42 @@ struct SIMCard: Decodable, Identifiable, Sendable {
 struct CardList: Decodable { var current: String; var cards: [SIMCard] }
 
 enum VoIPStatus: String, Decodable, Sendable {
-    case active, ineffective, unconfigured
+    case active, pending, ineffective, unconfigured
 }
 
-private struct VoIPStatusResponse: Decodable { var state: VoIPStatus }
+struct VoIPStatusResponse: Decodable {
+    var state: VoIPStatus
+    var reason: String?
+    var apns_code: Int?
+
+    var message: String {
+        switch reason {
+        case "unconfigured": "节点尚未配置完整的 APNs 标识或密钥。"
+        case "signing_unavailable": "节点当前不具备 APNs 签名能力，后台来电推送不可用。"
+        case "invalid_key": "节点的 APNs 密钥无法签名，请检查密钥及其配置。"
+        case "bundle_mismatch": "App 的 Bundle ID 与节点 APNs 配置不匹配。"
+        case "team_mismatch": "App 的签名团队与节点 APNs 配置不匹配。"
+        case "missing_metadata": "节点缺少 App 注册信息，请更新 App 并重新连接节点。"
+        case "environment_mismatch", "invalid_environment": "App 与已注册 token 的推送环境不匹配或无效，请重新注册。"
+        case "invalid_token": "节点保存的设备 token 无效，请重新打开 App 注册。"
+        case "token_expired": "APNs 已注销本机 token，等待手机更新注册。"
+        case "not_registered": "节点尚未收到本机的推送注册，请保持 App 打开并连接节点。"
+        case "not_selected": "本机未被选为来电接收设备，请在 OpenWrt 状态页切换接收手机。"
+        case "pending": "注册配置匹配。"
+        case "accepted": "APNs 已接受本机的真实来电推送；这不代表手机一定收到或响铃。接听时仍需能连接节点。"
+        case "apns_rejected": "APNs 拒绝了本机的来电推送（HTTP \(apns_code.map(String.init) ?? "未知")），请检查节点推送配置。"
+        case "connection_failed": "节点连接 APNs 失败，请检查节点网络和推送服务。"
+        case "status_unavailable": "节点无法读取本机注册状态，请检查节点推送服务。"
+        default:
+            switch state {
+            case .active: "APNs 已接受本机来电推送，接听时仍需能连接节点。"
+            case .pending: "注册配置匹配。"
+            case .unconfigured: "节点尚未配置完整的 APNs 标识或密钥。"
+            case .ineffective: "后台来电尚未验证或本机未被选中；节点未提供具体原因，请查看 OpenWrt 状态页。"
+            }
+        }
+    }
+}
 
 struct ATResponse: Decodable, Sendable {
     var command: String
@@ -270,20 +302,23 @@ struct DongleAPI: Sendable {
         let _: Empty = try await call("DELETE", "calls", query: query)
     }
 
-    func registerVoIPDevice(_ device: String, token: String, environment: String) async throws {
-        let _: Empty = try await call("POST", "push/register",
-                                      body: ["device": .s(device), "token": .s(token), "environment": .s(environment)])
+    func registerVoIPDevice(_ device: String, token: String, environment: String, metadata: [String: String]) async throws {
+        var body = metadata.mapValues { Value.s($0) }
+        body["device"] = .s(device)
+        body["token"] = .s(token)
+        body["environment"] = .s(environment)
+        let _: Empty = try await call("POST", "push/register", body: body)
     }
 
     func unregisterVoIPDevice(_ device: String) async throws {
         let _: Empty = try await call("DELETE", "push/register", body: ["device": .s(device)])
     }
 
-    func voipStatus(device: String, bundleID: String, environment: String) async throws -> VoIPStatus {
+    func voipStatus(device: String, bundleID: String, environment: String) async throws -> VoIPStatusResponse {
         let response: VoIPStatusResponse = try await call("GET", "push/status", query: [
             "device": device, "bundle_id": bundleID, "environment": environment,
         ])
-        return response.state
+        return response
     }
 
     /// Data plan usage of this month and today, in bytes. 0 limits mean no limit.

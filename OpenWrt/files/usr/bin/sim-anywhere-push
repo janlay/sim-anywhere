@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Send one short-lived VoIP push per registered device for an incoming call."""
+"""Validate registrations and send a VoIP push to the selected incoming-call device."""
 
 import base64
 import fcntl
@@ -11,10 +11,6 @@ import subprocess
 import sys
 import tempfile
 import time
-
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 KEY = "/etc/sim-anywhere-apns-key.p8"
 DEVICES = "/root/sim-anywhere-voip-tokens.json"
@@ -42,37 +38,162 @@ def load_config():
     return config
 
 
+def read_devices():
+    try:
+        with open(DEVICES) as source:
+            return json.load(source)
+    except FileNotFoundError:
+        return []
+
+
+def registration_reason(config, device):
+    if not device.get("bundle_id") or not device.get("team_id"):
+        return "missing_metadata"
+    if device["bundle_id"] != config["bundle_id"]:
+        return "bundle_mismatch"
+    if device["team_id"] != config["team_id"]:
+        return "team_mismatch"
+    if device.get("environment") not in ("development", "production"):
+        return "invalid_environment"
+    if not re.fullmatch(r"[0-9a-f]{32,256}", device.get("token", "")):
+        return "invalid_token"
+    delivery = current_delivery(config, device)
+    if delivery.get("code") == 410:
+        return "token_expired"
+    return None
+
+
+def current_delivery(config, device):
+    try:
+        with open(DELIVERY) as source:
+            delivery = json.load(source).get(device["device"], {})
+        if isinstance(delivery, dict) and delivery.get("fingerprint") == fingerprint(config, device):
+            return delivery
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    return {}
+
+
+def checked_config():
+    config = load_config()
+    bearer(config)
+    return config
+
+
+def list_devices():
+    unavailable_reason = "unconfigured"
+    try:
+        config = checked_config()
+    except ImportError:
+        config = None
+        unavailable_reason = "signing_unavailable"
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        config = None
+    result = []
+    for device in read_devices():
+        reason = registration_reason(config, device) if config else unavailable_reason
+        state = "invalid" if reason else "pending"
+        delivery = current_delivery(config, device) if config else {}
+        if not reason and delivery:
+            state = "accepted" if delivery.get("code") == 200 else "rejected"
+        # Never return a token or a signing key through LuCI.
+        entry = {k: device.get(k) for k in ("device", "name", "model", "os_version", "app_version",
+                                          "app_build", "environment", "updated_at")}
+        matched = config is not None and device.get("bundle_id") == config["bundle_id"] \
+            and device.get("team_id") == config["team_id"]
+        entry.update(selected=device.get("selected") is True, matched=matched, state=state, reason=reason,
+                     apns_code=delivery.get("code") if state in ("accepted", "rejected") else None,
+                     checked_at=delivery.get("at") if state in ("accepted", "rejected") else None)
+        result.append(entry)
+    return {"devices": result}
+
+
+def select_device(device_id):
+    with open(LOCK, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        devices = read_devices()
+        device = next((d for d in devices if d["device"] == device_id), None)
+        if device is None:
+            raise ValueError("device_not_found")
+        reason = registration_reason(checked_config(), device)
+        if reason:
+            raise ValueError(reason)
+        for device in devices:
+            device["selected"] = device["device"] == device_id
+        write_devices(devices)
+    return {"ok": True}
+
+
+def remove_device(device_id):
+    with open(LOCK, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        devices = read_devices()
+        remaining = [d for d in devices if d["device"] != device_id]
+        if len(remaining) == len(devices):
+            raise ValueError("device_not_found")
+        write_devices(remaining)
+    return {"ok": True}
+
+
+def write_devices(devices):
+    pending = DEVICES + ".tmp"
+    fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as target:
+        json.dump(devices, target)
+    os.replace(pending, DEVICES)
+
+
 def fingerprint(config, device):
     key = os.stat(config["private_key_path"])
     fields = [config["team_id"], config["key_id"], config["bundle_id"],
-              str(key.st_ino), str(key.st_mtime_ns), device["token"], device["environment"]]
+              str(key.st_ino), str(key.st_mtime_ns), device["token"], device["environment"],
+              device.get("bundle_id", ""), device.get("team_id", "")]
     return hashlib.sha256("\0".join(fields).encode()).hexdigest()
 
 
-def delivery_status(device_id, bundle_id, environment):
+def status_details(device_id, bundle_id, environment):
+    def result(state, reason, **details):
+        return dict(state=state, reason=reason, **details)
+
     try:
         config = load_config()
         if not os.path.isfile(KEY):
-            return "unconfigured"
+            return result("unconfigured", "unconfigured")
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        return "unconfigured"
+        return result("unconfigured", "unconfigured")
     if config["bundle_id"] != bundle_id:
-        return "ineffective"
+        return result("ineffective", "bundle_mismatch")
     try:
-        bearer(config)  # Check that the installed key can sign an APNs provider token.
-        with open(DEVICES) as source:
-            devices = json.load(source)
-        device = next((d for d in devices if d["device"] == device_id), None)
-        if device is None or device["environment"] != environment:
-            return "ineffective"
-        with open(DELIVERY) as source:
-            deliveries = json.load(source)
-        accepted = deliveries.get(device_id)
-        if accepted == fingerprint(config, device):
-            return "active"
+        bearer(config)
+    except ImportError:
+        return result("ineffective", "signing_unavailable")
+    except (OSError, ValueError, TypeError):
+        return result("ineffective", "invalid_key")
+    try:
+        device = next((d for d in read_devices() if d["device"] == device_id), None)
+        if device is None:
+            return result("ineffective", "not_registered")
+        if device["environment"] != environment:
+            return result("ineffective", "environment_mismatch")
+        reason = registration_reason(config, device)
+        if reason:
+            return result("ineffective", reason)
+        if not device.get("selected"):
+            return result("ineffective", "not_selected")
+        delivery = current_delivery(config, device)
+        if delivery.get("code") == 200:
+            return result("active", "accepted", apns_code=200)
+        if delivery:
+            return result("ineffective", "apns_rejected" if delivery["code"] else "connection_failed",
+                          apns_code=delivery["code"])
+        return result("pending", "pending")
     except (OSError, ValueError, KeyError, TypeError):
-        pass
-    return "ineffective"
+        return result("ineffective", "status_unavailable")
+
+
+def delivery_status(device_id, bundle_id, environment):
+    return status_details(device_id, bundle_id, environment)["state"]
 
 
 def record_delivery(device, config, code):
@@ -84,10 +205,8 @@ def record_delivery(device, config, code):
                     deliveries = json.load(source)
             except (OSError, ValueError):
                 deliveries = {}
-            if code == 200:
-                deliveries[device["device"]] = fingerprint(config, device)
-            else:
-                deliveries.pop(device["device"], None)
+            deliveries[device["device"]] = {"fingerprint": fingerprint(config, device),
+                                              "code": code, "at": int(time.time())}
             pending = DELIVERY + ".tmp"
             fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             os.fchmod(fd, 0o600)
@@ -103,6 +222,10 @@ def b64(data):
 
 
 def bearer(config):
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+
     with open(config["private_key_path"], "rb") as f:
         key = serialization.load_pem_private_key(f.read(), password=None)
     head = b64(json.dumps({"alg": "ES256", "kid": config["key_id"]}, separators=(",", ":")).encode())
@@ -133,24 +256,7 @@ def send(device, call_id, config, auth):
     return int(p.stdout or 0) if p.returncode == 0 else 0
 
 
-def remove_invalid(ids):
-    with open(LOCK, "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            with open(DEVICES) as f:
-                devices = json.load(f)
-            kept = [d for d in devices if d["device"] not in ids]
-            if len(kept) != len(devices):
-                tmp = DEVICES + ".tmp"
-                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(fd, "w") as f:
-                    json.dump(kept, f)
-                os.replace(tmp, DEVICES)
-        except OSError:
-            pass
-
-
-def main(call_id):
+def main(call_id, recipient=None):
     if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", call_id):
         raise ValueError("invalid call ID")
     try:
@@ -160,29 +266,37 @@ def main(call_id):
             return
         config = load_config()
         auth = bearer(config)
-    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
+        devices = [d for d in devices if (d["device"] == recipient if recipient is not None
+                   else d.get("selected") is True) and not registration_reason(config, d)][:1]
+    except (OSError, ValueError, KeyError, ImportError, subprocess.TimeoutExpired) as e:
         print("VoIP push is not configured:", type(e).__name__, file=sys.stderr)
         return
-    invalid = set()
     for device in devices:
         try:
             code = send(device, call_id, config, auth)
             record_delivery(device, config, code)
-            if code in (410,):
-                invalid.add(device["device"])
-            elif code != 200:
+            if code != 200:
                 print("APNs status", code, file=sys.stderr)
         except (OSError, subprocess.TimeoutExpired, KeyError, ValueError):
             record_delivery(device, config, 0)
             print("APNs delivery failed", file=sys.stderr)
-    if invalid:
-        remove_invalid(invalid)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 5 and sys.argv[1] == "status":
-        print(json.dumps({"state": delivery_status(sys.argv[2], sys.argv[3], sys.argv[4])}))
-    elif len(sys.argv) == 2:
-        main(sys.argv[1])
-    else:
-        sys.exit("usage: sim-anywhere-push <call-id> | status <device-id> <bundle-id> <environment>")
+    try:
+        if len(sys.argv) == 5 and sys.argv[1] == "status":
+            print(json.dumps(status_details(sys.argv[2], sys.argv[3], sys.argv[4])))
+        elif sys.argv[1:] == ["devices"]:
+            print(json.dumps(list_devices()))
+        elif len(sys.argv) == 3 and sys.argv[1] == "select":
+            print(json.dumps(select_device(sys.argv[2])))
+        elif len(sys.argv) == 3 and sys.argv[1] == "remove":
+            print(json.dumps(remove_device(sys.argv[2])))
+        elif len(sys.argv) in (2, 3):
+            main(*sys.argv[1:])
+        else:
+            sys.exit("usage: sim-anywhere-push <call-id> [device-id] | status <device-id> <bundle-id> <environment> | devices | select <device-id> | remove <device-id>")
+    except (OSError, ValueError, KeyError, TypeError, ImportError, subprocess.TimeoutExpired):
+        # Do not expose registration tokens or signing material in errors.
+        print(json.dumps({"ok": False, "error": "device_operation_failed"}))
+        sys.exit(1)

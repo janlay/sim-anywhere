@@ -13,7 +13,8 @@
 		"write": {
 			"file": {
 				"/etc/sim-anywhere-apns-key.p8.pending": [ "write" ],
-				"/usr/bin/sim-anywhere-push-key": [ "exec" ]
+				"/usr/bin/sim-anywhere-push-key": [ "exec" ],
+				"/usr/bin/sim-anywhere-push": [ "exec" ]
 			},
 			"ubus": {
 				"luci": [ "setInitAction" ],

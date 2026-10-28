@@ -4,9 +4,12 @@
 
 ### Features
 
+- Tap Wi-Fi Calling or VoIP on the phone tab to see status details and failure reasons in a popover.
+
 - The status screen shows the link uptime as hh:mm:ss and counts it up every second.
 - Tap the status card to switch between the SIM alias and the masked phone number.
-- The phone tab shows Wi-Fi Calling and VoIP on one row. Blue means normal; VoIP is blue once APNs is configured.
+- The OpenWrt status page lists registered phones, checks app push metadata, and selects one incoming-call recipient for foreground and background calls.
+- The phone tab shows Wi-Fi Calling and VoIP on one row. VoIP is blue after APNs accepts a real call push for the selected device, orange while unverified or unselected, and gray when unconfigured.
 
 ### Other
 

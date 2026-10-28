@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 # dongle-status: node data for luci-app-dongle.
-# Usage: dongle-status status | repair | gid | egress-ip | latency | logs <name> [lines]
+# Usage: dongle-status status | push-devices | repair | gid | egress-ip | latency | logs <name> [lines]
 import ipaddress, json, os, subprocess, sys
 from collections import Counter
 
@@ -277,6 +277,8 @@ def status():
 def main(argv):
 	if argv == ["status"]:
 		print(json.dumps(status()))
+	elif argv == ["push-devices"]:
+		print(run(["/usr/bin/sim-anywhere-push", "devices"]) or '{"devices":[],"error":"push_status_failed"}')
 	elif argv == ["repair"]:
 		print(json.dumps(repair()))
 	elif argv == ["gid"]:
@@ -291,7 +293,7 @@ def main(argv):
 			sys.exit("lines must be 1..2000")
 		print("\n".join(run(LOGS[argv[1]]).splitlines()[-n:]))
 	else:
-		sys.exit("usage: dongle-status status | repair | gid | egress-ip | latency | logs <name> [lines]")
+		sys.exit("usage: dongle-status status | push-devices | repair | gid | egress-ip | latency | logs <name> [lines]")
 
 
 if __name__ == "__main__":

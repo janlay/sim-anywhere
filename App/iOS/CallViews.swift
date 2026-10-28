@@ -15,37 +15,82 @@ struct PhoneView: View {
     @State private var pendingDelete: [String] = []
     @FocusState private var editing: Bool
     @State private var fieldFrame = CGRect.zero
+    @State private var showWiFiStatus = false
+    @State private var showVoIPStatus = false
 
     private var shown: [CallRecord] { box.isEmpty ? store.calls : store.calls.filter { $0.dir == box } }
 
-    /// Wi-Fi Calling and VoIP on one row. Each icon and name takes the state color.
+    private var wifiStatusMessage: String {
+        var details: [String] = []
+        if !phone.connected {
+            details.append("未连接节点的通话服务，正在尝试连接。")
+        } else {
+            if !phone.ready { details.append("节点上的模组或通话服务尚未就绪。") }
+            let status = switch phone.wifi {
+            case "registered": "Wi-Fi Calling 已注册，可通过运营商 IMS 通话。"
+            case "connecting": "Wi-Fi Calling 正在连接和注册，请稍候。"
+            case "error": "Wi-Fi Calling 注册失败，节点会重试；可在 OpenWrt 日志页查看失败原因。"
+            case "unsupported": "当前 SIM 卡或运营商拒绝 Wi-Fi Calling 注册，请确认已开通此服务。"
+            case "unavailable": "未找到可用的运营商 ePDG，当前网络或 SIM 卡暂时无法使用 Wi-Fi Calling。"
+            case "off": "节点的 Wi-Fi Calling 未启用或服务未连接。"
+            case .some(let state): "节点报告的 Wi-Fi Calling 状态：\(state)"
+            case nil: "节点尚未提供 Wi-Fi Calling 状态。"
+            }
+            details.append(status)
+        }
+        if let error = phone.error { details.append("最近通话错误：\(error)") }
+        return details.joined(separator: "\n\n")
+    }
+
     private var callingStatus: some View {
-        let wifi: Color = switch phone.wifi {
-        case "registered": .blue
-        case "error": .orange
-        default: .secondary
+        let wifi: Color = if !phone.connected || !phone.ready || phone.error != nil {
+            .orange
+        } else {
+            switch phone.wifi {
+            case "registered": .blue
+            case "error", "unsupported", "unavailable": .orange
+            default: .secondary
+            }
         }
         let voip: Color = switch phone.voipStatus {
-        case .active, .ineffective: .blue
+        case .active, .pending: .blue
+        case .ineffective: .orange
         case .unconfigured: .secondary
         }
         return HStack {
-            Label("Wi-Fi Calling", systemImage: "wifi").foregroundStyle(wifi)
+            Button { showWiFiStatus = true } label: {
+                Label("Wi-Fi Calling", systemImage: "wifi").foregroundStyle(wifi)
+            }
+            .accessibilityHint("查看 Wi-Fi Calling 状态和通话错误")
+            .popover(isPresented: $showWiFiStatus) {
+                statusTooltip("Wi-Fi Calling", message: wifiStatusMessage)
+            }
             Spacer()
-            Label("VoIP", systemImage: "iphone.gen3.radiowaves.left.and.right").foregroundStyle(voip)
+            Button { showVoIPStatus = true } label: {
+                Label("VoIP", systemImage: "iphone.gen3.radiowaves.left.and.right").foregroundStyle(voip)
+            }
+            .accessibilityHint("查看来电推送状态和失败原因")
+            .popover(isPresented: $showVoIPStatus) {
+                statusTooltip("VoIP", message: phone.voipStatusMessage)
+            }
         }
+        .buttonStyle(.plain)
+    }
+
+    private func statusTooltip(_ title: String, message: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).font(.headline)
+            Text(message).font(.callout).textSelection(.enabled)
+        }
+        .padding()
+        .frame(idealWidth: 300, maxWidth: 320, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .presentationCompactAdaptation(.popover)
     }
 
     var body: some View {
         NavigationStack {
             List(selection: $selection) {
-                if !phone.ready {
-                    Label(phone.connected ? "节点上的模组未就绪" : "未连接通话服务", systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
-                }
-                if let e = phone.error {
-                    ErrorLabel(e)
-                }
                 callingStatus
                 Section {
                     HStack {
@@ -89,9 +134,8 @@ struct PhoneView: View {
                     }
                     .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { fieldFrame = $0 }
                 } footer: {
-                    Text((phone.path == "wifi" ? "通话经节点的 Wi-Fi Calling（运营商 IMS）接通，按 SIM 卡资费计费。"
-                                                : "通话经节点上的 4G 模组接通，按 SIM 卡资费计费。")
-                         + (phone.voipStatus == .active ? "后台来电通知已启用，接听时需能连接节点。" : "仅在 App 打开时可以接听来电。"))
+                    Text(phone.path == "wifi" ? "通话经节点的 Wi-Fi Calling（运营商 IMS）接通，按 SIM 卡资费计费。"
+                                              : "通话经节点上的 4G 模组接通，按 SIM 卡资费计费。")
                 }
                 Section("通话记录") {
                     if let e = store.callsError {

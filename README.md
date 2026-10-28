@@ -63,6 +63,31 @@ flowchart LR
 按文档构建或验证所选组件，然后部署并确认服务正常启动和响应。最后报告改动的文件或服务、执行的检查，以及仍需完成的设置。
 ```
 
+## 构建自己的 iOS App
+
+### 模拟器构建（无需 Apple 开发者账号）
+
+1. 安装 Xcode 和 XcodeGen：`brew install xcodegen`。
+2. 在仓库根目录执行 `make debug`。默认构建 iOS 模拟器版本，不签名。
+
+### 真机构建
+
+1. 在 Apple Developer 后台创建唯一的 Bundle ID，并启用 Push Notifications。记下你的 Team ID。
+2. 执行 `cp Local.mk.example Local.mk`，在 `Local.mk` 中填写 `TEAM_ID`、`BUNDLE_ID`、`DEBUG_DESTINATION`（`platform=iOS,id=<设备 UDID>`，可用 `xcrun devicectl list devices` 查看）。`Local.mk` 已被 Git 忽略。
+3. 执行 `make debug`，然后用 Xcode 或 `xcrun devicectl device install app` 安装生成的 App。
+4. 如需来电推送（App 未运行时接听），按 [App/SELF_BUILD.md](./App/SELF_BUILD.md) 配置 APNs 密钥和 OpenWrt 节点。
+
+`make` 只读取 `Local.mk` 中的个人配置，仓库中不含 Team ID、描述文件或密钥。发布到 TestFlight 需要 App Store Connect API 密钥，流程见 [App/SELF_BUILD.md](./App/SELF_BUILD.md)。
+
+### 提交代码
+
+克隆后启用提交检查，它会拦截密钥和本地文件：
+
+```bash
+brew install gitleaks
+git config core.hooksPath .githooks
+```
+
 ## 安全与数据
 
 OpenWrt API 会提供模块状态、设备标识、短信和通话数据。iOS App 默认通过局域网 HTTP 连接节点，通话还需要可访问的 WebSocket 端点。请将 API 限制在可信网络内；如需远程访问，请使用安全配置的 TLS 反向代理并限制访问对象。提交问题时不要附上未脱敏的模块标识、短信内容、通话记录或节点地址。
@@ -143,6 +168,31 @@ First read README.md, the selected component's build files, and source code. Ins
 Preserve existing configuration and runtime data. Do not print, copy, or commit secrets. Do not send SMS, place calls, change carrier or firewall settings, expose the node API to the public Internet, or reboot the router or module unless I explicitly requested that action. If installation requires changes beyond the selected component and its documented prerequisites, explain the exact changes and wait for authorization.
 
 Build or validate the selected component using its documented checks. Deploy it, confirm that it starts and responds as expected, then report changed files or services, checks performed, and remaining setup steps.
+```
+
+## Build Your Own iOS App
+
+### Simulator build (no Apple Developer account needed)
+
+1. Install Xcode and XcodeGen: `brew install xcodegen`.
+2. From the repository root, run `make debug`. It builds for the iOS Simulator without signing.
+
+### Device build
+
+1. In the Apple Developer portal, create a unique Bundle ID with Push Notifications enabled. Note your Team ID.
+2. Run `cp Local.mk.example Local.mk`, then set `TEAM_ID`, `BUNDLE_ID` and `DEBUG_DESTINATION` (`platform=iOS,id=<device UDID>`; `xcrun devicectl list devices` shows it) in `Local.mk`. `Local.mk` is ignored by Git.
+3. Run `make debug`, then install the built app with Xcode or `xcrun devicectl device install app`.
+4. For incoming-call pushes while the app is closed, configure the APNs key and the OpenWrt node as described in [App/SELF_BUILD.md](./App/SELF_BUILD.md).
+
+`make` reads personal settings only from `Local.mk`. The repository contains no Team ID, provisioning profile or key. TestFlight uploads need an App Store Connect API key; the process is in [App/SELF_BUILD.md](./App/SELF_BUILD.md).
+
+### Committing code
+
+After cloning, enable the commit check. It blocks secrets and local-only files:
+
+```bash
+brew install gitleaks
+git config core.hooksPath .githooks
 ```
 
 ## Security and Data

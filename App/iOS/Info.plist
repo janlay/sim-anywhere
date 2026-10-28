@@ -29,6 +29,10 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>PushEnvironment</key>
+	<string>$(APS_ENVIRONMENT)</string>
+	<key>SigningTeamID</key>
+	<string>$(DEVELOPMENT_TEAM)</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>

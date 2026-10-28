@@ -41,6 +41,8 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         GitShortHash: $(SIM_ANYWHERE_GIT_SHORT_HASH)
+        SigningTeamID: $(DEVELOPMENT_TEAM)
+        PushEnvironment: $(APS_ENVIRONMENT)
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         BGTaskSchedulerPermittedIdentifiers:

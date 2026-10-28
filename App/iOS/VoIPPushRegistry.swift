@@ -1,5 +1,6 @@
 import Foundation
 import PushKit
+import UIKit
 
 /// Registers the device's VoIP token and hands wake-up pushes to CallKit through CallSession.
 @MainActor
@@ -36,7 +37,16 @@ final class VoIPPushRegistry: NSObject, @preconcurrency PKPushRegistryDelegate {
         }
         guard let token, let api = DongleAPI(host: host) else { return }
         Task {
-            try? await api.registerVoIPDevice(deviceID, token: token, environment: environment)
+            let info = Bundle.main.infoDictionary ?? [:]
+            try? await api.registerVoIPDevice(deviceID, token: token, environment: environment, metadata: [
+                "bundle_id": Bundle.main.bundleIdentifier ?? "",
+                "team_id": info["SigningTeamID"] as? String ?? "",
+                "name": UIDevice.current.name,
+                "model": UIDevice.current.model,
+                "os_version": UIDevice.current.systemVersion,
+                "app_version": info["CFBundleShortVersionString"] as? String ?? "",
+                "app_build": info["CFBundleVersion"] as? String ?? "",
+            ])
             await calls?.refreshVoIPStatus(host: host)
         }
     }
@@ -66,11 +76,7 @@ final class VoIPPushRegistry: NSObject, @preconcurrency PKPushRegistryDelegate {
     }
 
     private var environment: String {
-        #if DEBUG
-        "development"
-        #else
-        "production"
-        #endif
+        Bundle.main.object(forInfoDictionaryKey: "PushEnvironment") as? String ?? ""
     }
 }
 
