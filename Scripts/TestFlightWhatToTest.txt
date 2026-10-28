@@ -1,8 +1,5 @@
-Feature: Incoming calls ring in the background through APNs VoIP push.
-Feature: SMS and call records are kept separately for each SIM; the SIM card menu shows masked numbers.
-Feature: Set an alias for each SIM and see the network mode (5G, LTE, 3G, 2G) on the status screen.
-Feature: New app icon.
-Fix: Unsupported Wi-Fi Calling registration is stopped, and its state is reported.
-Fix: Modem status collection is restored.
-Fix: A missing AT device no longer becomes a regular file after a USB disconnect.
-Please verify node connectivity, text messaging, incoming calls while the app is in the background, and per-SIM records.
+Feature: The status screen shows the link uptime as hh:mm:ss and counts it up every second.
+Feature: Tap the status card to switch between the SIM alias and the masked phone number.
+Feature: The phone tab shows Wi-Fi Calling and VoIP on one row, colored by state; VoIP is blue once APNs is configured.
+Other: The node announces its address only on the LAN interface, so a virtual address is no longer announced.
+Please verify the uptime counter, tapping the status card with an alias set, the phone tab colors, node discovery on the LAN, and incoming calls while the app is in the background.

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.6
+
+### Features
+
+- The status screen shows the link uptime as hh:mm:ss and counts it up every second.
+- Tap the status card to switch between the SIM alias and the masked phone number.
+- The phone tab shows Wi-Fi Calling and VoIP on one row. Blue means normal; VoIP is blue once APNs is configured.
+
+### Other
+
+- The node announces its address only on the LAN firewall zone interface, so a virtual address is no longer announced.
+
 ## 1.5
 
 ### Features
