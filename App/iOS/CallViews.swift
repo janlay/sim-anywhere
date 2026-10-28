@@ -18,6 +18,24 @@ struct PhoneView: View {
 
     private var shown: [CallRecord] { box.isEmpty ? store.calls : store.calls.filter { $0.dir == box } }
 
+    /// Wi-Fi Calling and VoIP on one row. Each icon and name takes the state color.
+    private var callingStatus: some View {
+        let wifi: Color = switch phone.wifi {
+        case "registered": .blue
+        case "error": .orange
+        default: .secondary
+        }
+        let voip: Color = switch phone.voipStatus {
+        case .active, .ineffective: .blue
+        case .unconfigured: .secondary
+        }
+        return HStack {
+            Label("Wi-Fi Calling", systemImage: "wifi").foregroundStyle(wifi)
+            Spacer()
+            Label("VoIP", systemImage: "iphone.gen3.radiowaves.left.and.right").foregroundStyle(voip)
+        }
+    }
+
     var body: some View {
         NavigationStack {
             List(selection: $selection) {
@@ -28,22 +46,7 @@ struct PhoneView: View {
                 if let e = phone.error {
                     ErrorLabel(e)
                 }
-                switch phone.wifi {
-                case "registered": Label("Wi-Fi Calling 已注册", systemImage: "wifi")
-                case "connecting": Label("Wi-Fi Calling 正在连接…", systemImage: "wifi").foregroundStyle(.secondary)
-                case "unsupported": Label("此 SIM 不支持 Wi-Fi Calling", systemImage: "wifi.slash").foregroundStyle(.secondary)
-                case "unavailable": Label("Wi-Fi Calling 不可用", systemImage: "wifi.slash").foregroundStyle(.secondary)
-                case "error": Label("Wi-Fi Calling 出错，通话改走模组", systemImage: "wifi.exclamationmark").foregroundStyle(.orange)
-                default: Label("Wi-Fi Calling 未注册", systemImage: "wifi.slash").foregroundStyle(.secondary)
-                }
-                switch phone.voipStatus {
-                case .active:
-                    Label("VoIP已生效", systemImage: "iphone.gen3.radiowaves.left.and.right").foregroundStyle(.green)
-                case .ineffective:
-                    Label("VoIP 未生效，仅限App内通话", systemImage: "iphone.gen3.radiowaves.left.and.right").foregroundStyle(.orange)
-                case .unconfigured:
-                    Label("VoIP未配置，仅限App内通话", systemImage: "iphone.gen3.slash").foregroundStyle(.secondary)
-                }
+                callingStatus
                 Section {
                     HStack {
                         TextField("号码", text: $number)

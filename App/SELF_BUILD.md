@@ -19,4 +19,4 @@ The app registers a VoIP device token when it starts. Development builds use the
 
 The APNs key must belong to the team that signed the installed app. A key from a different team cannot send to that app's VoIP topic. The push wakes the app; the existing WebSocket carries call signaling and audio. For calls outside the local network, provide a secure route from the phone back to the node. APNs delivery does not guarantee that every call will ring.
 
-The phone tab shows **VoIP not configured** when the node lacks identifiers or a key, **VoIP not active** when validation or device registration is incomplete, and **VoIP active** only after APNs accepts a real incoming-call push for this device and the current configuration. APNs acceptance alone does not prove that the phone rang.
+The phone tab shows **VoIP not configured** when the node lacks identifiers or a key, and a blue **VoIP 可用** once they are present, even before APNs accepts a push for this device. APNs acceptance alone does not prove that the phone rang.

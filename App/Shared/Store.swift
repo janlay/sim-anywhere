@@ -468,6 +468,12 @@ enum Fmt {
         return d > 0 ? "\(d) 天 \(h) 小时" : h > 0 ? "\(h) 小时 \(m) 分" : "\(m) 分钟"
     }
 
+    /// Duration as hh:mm:ss. Hours keep counting past 24 instead of switching to days.
+    static func hms(_ s: Int64?) -> String {
+        guard let s else { return "—" }
+        return String(format: "%02d:%02d:%02d", s / 3600, s % 3600 / 60, s % 60)
+    }
+
     /// Call length as m:ss or h:mm:ss.
     static func clock(_ s: Int) -> String {
         s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s % 3600 / 60, s % 60) : String(format: "%d:%02d", s / 60, s % 60)

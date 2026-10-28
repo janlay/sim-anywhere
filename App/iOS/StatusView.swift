@@ -173,8 +173,10 @@ struct StatusView: View {
                     if (s.netifd_up == 1 && s.link_uptime != nil) || signal != nil {
                         HStack {
                             if s.netifd_up == 1, s.link_uptime != nil {
-                                infoRow("clock", "连续在线 \(Fmt.duration(s.link_uptime))")
-                                    .foregroundStyle(.secondary).monospacedDigit()
+                                TimelineView(.periodic(from: .now, by: 1)) { context in
+                                    infoRow("clock", Fmt.hms(liveUptime(s, at: context.date)))
+                                        .foregroundStyle(.secondary).monospacedDigit()
+                                }
                             }
                             Spacer(minLength: 8)
                             if let signal { Pill(text: "信号\(signal.label)", color: signal.color) }
@@ -184,6 +186,7 @@ struct StatusView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .contentShape(.rect)
+            .onTapGesture { toggleSIMDisplay(s) }
             .contextMenu {
                 if h == .good { simAliasActions(s) }
             }
@@ -192,6 +195,20 @@ struct StatusView: View {
                 if h == .good { simAliasActions(s) }
             }
         }
+    }
+
+    /// Uptime at `date`: the node's value at the last AT sample plus the seconds since then.
+    private func liveUptime(_ s: DongleStatus, at date: Date) -> Int64? {
+        guard let up = s.link_uptime, let sample = s.sample_epoch else { return s.link_uptime }
+        return up + max(0, Int64(date.timeIntervalSince1970) - Int64(sample))
+    }
+
+    /// Tap on the verdict card: switch between the SIM alias and the masked number. Needs an alias.
+    private func toggleSIMDisplay(_ s: DongleStatus) {
+        guard let iccid = s.iccid, store.simAliases[iccid] != nil else { return }
+        let showingAlias = store.displayedSIMAlias(for: iccid) != nil
+        guard showingAlias || s.phone_masked != nil else { return }
+        store.showSIMAlias(!showingAlias, for: iccid)
     }
 
     @ViewBuilder
