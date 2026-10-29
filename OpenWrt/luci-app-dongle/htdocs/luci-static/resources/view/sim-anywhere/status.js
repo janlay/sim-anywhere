@@ -173,8 +173,10 @@ function pushDeviceTable(data, refresh) {
 			})
 		}, _('移除'));
 		return E('tr', { 'class': 'tr' }, [
-			E('td', { 'class': 'td' }, d.name || d.model || _('手机')),
-			E('td', { 'class': 'td' }, (d.model || '-') + ' / iOS ' + (d.os_version || '-')),
+			E('td', { 'class': 'td' }, [
+				E('div', {}, d.name || d.model || _('手机')),
+				E('small', {}, (d.model || '-') + ' / iOS ' + (d.os_version || '-'))
+			]),
 			E('td', { 'class': 'td' }, [ E('div', {}, [
 					d.matched ? E('span', { 'style': 'color: #2e7d32', 'title': _('与节点配置匹配') }, '✓ ') : '',
 					(d.app_version || '-') + ' (' + (d.app_build || '-') + ')' ]),
@@ -185,8 +187,8 @@ function pushDeviceTable(data, refresh) {
 		]);
 	});
 	if (!rows.length)
-		rows.push(E('tr', { 'class': 'tr' }, E('td', { 'class': 'td', 'colspan': 6 }, _('尚无手机注册，请打开 App 并连接节点'))));
-	return table([ _('手机'), _('机型 / 系统'), _('App / 注册信息'), _('验证状态'), _('最近注册'), _('来电接收') ], rows);
+		rows.push(E('tr', { 'class': 'tr' }, E('td', { 'class': 'td', 'colspan': 5 }, _('尚无手机注册，请打开 App 并连接节点'))));
+	return table([ _('手机'), _('App / 注册信息'), _('验证状态'), _('最近注册'), _('来电接收') ], rows);
 }
 
 function netText(net, present) {

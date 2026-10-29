@@ -11,6 +11,8 @@ final class VoIPPushRegistry: NSObject, @preconcurrency PKPushRegistryDelegate {
     private var token: String?
     private var host: String
 
+    static let nameKey = "phoneName"
+
     var statusDeviceID: String { deviceID }
     var statusEnvironment: String { environment }
 
@@ -41,7 +43,7 @@ final class VoIPPushRegistry: NSObject, @preconcurrency PKPushRegistryDelegate {
             try? await api.registerVoIPDevice(deviceID, token: token, environment: environment, metadata: [
                 "bundle_id": Bundle.main.bundleIdentifier ?? "",
                 "team_id": info["SigningTeamID"] as? String ?? "",
-                "name": UIDevice.current.name,
+                "name": Self.displayName,
                 "model": UIDevice.current.model,
                 "os_version": UIDevice.current.systemVersion,
                 "app_version": info["CFBundleShortVersionString"] as? String ?? "",
@@ -73,6 +75,12 @@ final class VoIPPushRegistry: NSObject, @preconcurrency PKPushRegistryDelegate {
               let id = UUID(uuidString: text) else { completion(); return }
         guard let calls else { completion(); return }
         calls.receiveVoIPPush(id: id, completion: completion)
+    }
+
+    /// The name set in Settings. iOS 16+ returns a generic name from UIDevice.name without an entitlement.
+    static var displayName: String {
+        let name = UserDefaults.standard.string(forKey: nameKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? UIDevice.current.model : String(name.prefix(64))
     }
 
     private var environment: String {

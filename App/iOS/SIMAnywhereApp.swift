@@ -56,6 +56,8 @@ struct SIMAnywhereApp: App {
 
 struct SettingsView: View {
     @Environment(Store.self) private var store
+    @Environment(CallSession.self) private var phone
+    @AppStorage(VoIPPushRegistry.nameKey) private var phoneName = ""
     @AppStorage(SMSText.linksKey) private var links = true
     @AppStorage(SMSText.codesKey) private var codes = true
     @State private var host = ""
@@ -63,6 +65,7 @@ struct SettingsView: View {
     @State private var scheme = "http"
     @State private var formError: String?
     @State private var confirmDisconnect = false
+    @FocusState private var nameFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -120,6 +123,15 @@ struct SettingsView: View {
                     }
                 }
                 Section {
+                    TextField(UIDevice.current.model, text: $phoneName)
+                        .focused($nameFocused)
+                        .onSubmit(renamePhone)
+                } header: {
+                    Text("手机名称")
+                } footer: {
+                    Text("节点的来电手机列表显示此名称。")
+                }
+                Section {
                     Toggle("识别链接", isOn: $links)
                     Toggle("识别验证码", isOn: $codes)
                 } header: {
@@ -162,6 +174,7 @@ struct SettingsView: View {
             }
             .navigationTitle("设置")
             .scrollDismissesKeyboard(.interactively)
+            .onChange(of: nameFocused) { _, focused in if !focused { renamePhone() } }
             .background(TapToDismissKeyboard())
             .onAppear { load() }
             .task(id: store.host) { await store.refreshServer() }
@@ -199,6 +212,10 @@ struct SettingsView: View {
 
     private var defaultPort: Int { scheme == "https" ? 443 : 80 }
     private var portPlaceholder: String { String(defaultPort) }
+
+    private func renamePhone() {
+        phone.phoneNameChanged(host: store.host)
+    }
 
     private func load() {
         let n = NodeAddress(endpoint: store.host)

@@ -117,7 +117,7 @@ struct VoIPStatusResponse: Decodable {
         case "token_expired": "APNs 已注销本机 token，等待手机更新注册。"
         case "not_registered": "节点尚未收到本机的推送注册，请保持 App 打开并连接节点。"
         case "not_selected": "本机未被选为来电接收设备，请在 OpenWrt 状态页切换接收手机。"
-        case "pending": "注册配置匹配。"
+        case "pending": "已在节点完成注册。"
         case "accepted": "APNs 已接受本机的真实来电推送；这不代表手机一定收到或响铃。接听时仍需能连接节点。"
         case "apns_rejected": "APNs 拒绝了本机的来电推送（HTTP \(apns_code.map(String.init) ?? "未知")），请检查节点推送配置。"
         case "connection_failed": "节点连接 APNs 失败，请检查节点网络和推送服务。"
@@ -125,7 +125,7 @@ struct VoIPStatusResponse: Decodable {
         default:
             switch state {
             case .active: "APNs 已接受本机来电推送，接听时仍需能连接节点。"
-            case .pending: "注册配置匹配。"
+            case .pending: "已在节点完成注册。"
             case .unconfigured: "节点尚未配置完整的 APNs 标识或密钥。"
             case .ineffective: "后台来电尚未验证或本机未被选中；节点未提供具体原因，请查看 OpenWrt 状态页。"
             }

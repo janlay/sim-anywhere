@@ -27,7 +27,7 @@ struct PhoneView: View {
         } else {
             if !phone.ready { details.append("节点上的模组或通话服务尚未就绪。") }
             let status = switch phone.wifi {
-            case "registered": "Wi-Fi Calling 已注册，可通过运营商 IMS 通话。"
+            case "registered": "Wi-Fi Calling 已注册，通话费用参考运营商的本地语音资费标准。"
             case "connecting": "Wi-Fi Calling 正在连接和注册，请稍候。"
             case "error": "Wi-Fi Calling 注册失败，节点会重试；可在 OpenWrt 日志页查看失败原因。"
             case "unsupported": "当前 SIM 卡或运营商拒绝 Wi-Fi Calling 注册，请确认已开通此服务。"

@@ -83,6 +83,11 @@ final class CallSession: NSObject {
         push = VoIPPushRegistry(calls: self)
     }
 
+    /// Registers the phone again so the node shows the name set in Settings.
+    func phoneNameChanged(host: String) {
+        push?.sync(host: host)
+    }
+
     /// Keeps the WebSocket open while the app is in the foreground or a call is in progress.
     func update(host: String, active: Bool) {
         push?.sync(host: host)
